@@ -126,9 +126,12 @@ fn create_job(_pid: u32) -> Result<isize, String> {
 fn close_job(_job: isize) {}
 
 fn dist_dir() -> Result<PathBuf, String> {
-    let dev = Path::new(env!("CARGO_MANIFEST_DIR")).join("../dist");
-    if dev.join("index.html").is_file() {
-        return Ok(dev);
+    #[cfg(debug_assertions)]
+    {
+        let dev = Path::new(env!("CARGO_MANIFEST_DIR")).join("../dist");
+        if dev.join("index.html").is_file() {
+            return Ok(dev);
+        }
     }
     let current = std::env::current_exe().map_err(|error| error.to_string())?;
     let beside = current
