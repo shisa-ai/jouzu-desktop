@@ -19,7 +19,8 @@ pub fn start(app: &tauri::AppHandle) -> Result<String, String> {
     // A previous host may have left discovery behind. Never navigate to that
     // stale port while the new host is starting.
     let _ = std::fs::remove_file(&info_path);
-    let mut child = Command::new(&binary)
+    let mut command = Command::new(&binary);
+    command
         .arg("--dist")
         .arg(&dist)
         .arg("--home")
@@ -28,7 +29,14 @@ pub fn start(app: &tauri::AppHandle) -> Result<String, String> {
         .arg(&runtime_home)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    let mut child = command
         .spawn()
         .map_err(|error| format!("Could not start the host: {error}"))?;
     let job = match create_job(child.id()) {
