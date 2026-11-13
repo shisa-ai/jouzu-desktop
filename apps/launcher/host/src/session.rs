@@ -3212,7 +3212,23 @@ pub struct SessionManager {
     runtime_home: PathBuf,
     sessions: Mutex<HashMap<String, Arc<Session>>>,
     clients: Mutex<HashMap<String, Vec<String>>>,
+    /// The desktop uses one global event stream rather than one stream per
+    /// session. While it is connected, keep the sessions it can see alive.
+    global_clients: AtomicU64,
     persisted_cache: Mutex<Option<Vec<Value>>>,
+}
+
+/// Keeps idle sessions from being reaped while a global event stream is open.
+pub struct GlobalClientGuard {
+    manager: Arc<SessionManager>,
+}
+
+impl Drop for GlobalClientGuard {
+    fn drop(&mut self) {
+        self.manager
+            .global_clients
+            .fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 impl SessionManager {
@@ -3238,6 +3254,7 @@ impl SessionManager {
             runtime_home,
             sessions: Mutex::new(HashMap::new()),
             clients: Mutex::new(HashMap::new()),
+            global_clients: AtomicU64::new(0),
             persisted_cache: Mutex::new(None),
         }
     }
@@ -3763,6 +3780,12 @@ impl SessionManager {
     /// metadata-only: it never starts a runtime and never returns transcript
     /// bodies.
     pub fn reap_idle(&self, ttl: Duration) {
+        // The desktop's single global stream has no per-session subscriber
+        // count. Its open window may still be showing any of these sessions,
+        // so do not reap while it is connected.
+        if self.global_clients.load(Ordering::Relaxed) > 0 {
+            return;
+        }
         let mut sessions = self
             .sessions
             .lock()
@@ -3939,6 +3962,15 @@ impl SessionManager {
             if !entry.iter().any(|existing| existing == capability) {
                 entry.push(capability.clone());
             }
+        }
+    }
+
+    /// Register a client whose stream covers every session. The guard keeps
+    /// idle sessions from being reaped for the lifetime of that stream.
+    pub fn enter_global_client(self: &Arc<Self>) -> GlobalClientGuard {
+        self.global_clients.fetch_add(1, Ordering::Relaxed);
+        GlobalClientGuard {
+            manager: Arc::clone(self),
         }
     }
 

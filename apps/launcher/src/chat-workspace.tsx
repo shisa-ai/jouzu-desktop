@@ -511,6 +511,10 @@ export function ChatWorkspace({ path, revision = 0, newSession = true, locked = 
     const submittedVideos = videoRef.current;
     const value = [...submittedVideos.map(videoMarker), typed].filter(Boolean).join("\n");
     if (!value.trim() || readingRef.current) return;
+    if (snapshot.prompts?.length || snapshot.status === "waiting_approval" || snapshot.status === "waiting_question") {
+      setNotification("Answer the pending approval or question before sending.");
+      return;
+    }
     const submitted = attachmentRef.current;
     const submitDraftKey = draftKeyRef.current;
     sendCancelRef.current = false;
@@ -866,9 +870,10 @@ export function ChatWorkspace({ path, revision = 0, newSession = true, locked = 
     setSelectedSession(sessionPath);
     setHero(false);
     const summary = sessions.find(item => normalizedPath(item.path) === normalizedPath(sessionPath));
-    if (client && (summary?.running || summary?.status === "recovering")) {
-      // The disk preview has no in-flight assistant text. A live/running session
-      // must attach through the host store so the partial row and deltas survive.
+    const needsLiveState = !!summary && (summary.running || ["starting", "recovering", "waiting_approval", "waiting_question"].includes(summary.status));
+    if (client && needsLiveState) {
+      // A waiting session has host-owned approvals/questions and its in-flight
+      // assistant text; a disk preview has neither.
       startSwitch(sessionPath);
       return;
     }
@@ -988,6 +993,7 @@ export function ChatWorkspace({ path, revision = 0, newSession = true, locked = 
   // sessionFile: a new pending session has no file yet, which hid Stop during
   // the first turn.
   const composerRunning = snapshot.projection.running;
+  const waitingForPrompt = !!snapshot.prompts?.length || snapshot.status === "waiting_approval" || snapshot.status === "waiting_question";
   // A cancel token is sent with the clientMessageId, so Stop can be offered as
   // soon as the local outbox exists.
   const composerStarting = (snapshot.pending || !!localSubmitted) && !composerRunning;
@@ -1271,7 +1277,7 @@ export function ChatWorkspace({ path, revision = 0, newSession = true, locked = 
           </div>
           <div className="mb-2 flex flex-wrap items-center gap-2 px-1">{workspacePicker}</div>
           {promptNode && <div className="mb-3">{promptNode}</div>}
-          <Composer hero connected={snapshot.connected} pending={snapshot.pending || commandBusy || locked } opening={switching || opening || booting} starting={composerStarting} running={composerRunning} draft={draft} onDraft={updateDraft} onSend={() => void send()} onStop={stop} onCompact={() => void compactConversation()} onExport={() => void exportConversation()} onReloadMcp={() => void reloadSession()} attachments={attachments} onAddImages={files => void addImages(files)} onRemoveImage={id => updateAttachments(attachmentRef.current.filter(item => item.id !== id))} readingImages={readingImages} attachmentError={attachmentError} videos={videoUrls} onAddVideo={addVideoUrl} onRemoveVideo={removeVideoUrl} models={catalogModels.length ? catalogModels : snapshot.models ?? []} model={snapshot.model} onSelectModel={(provider, id) => void selectSessionModel(provider, id)} onRefreshModels={() => void connection.current?.loadModels()} onRetryModels={canRefreshModels ? onRetryModels : undefined} thinkingLevel={snapshot.thinkingLevel} thinkingLevels={snapshot.thinkingLevels ?? []} onThinkingLevel={level => void selectThinkingLevel(level)} />
+          <Composer hero connected={snapshot.connected} pending={snapshot.pending || commandBusy || locked } opening={switching || opening || booting} starting={composerStarting} running={composerRunning} waiting={waitingForPrompt} draft={draft} onDraft={updateDraft} onSend={() => void send()} onStop={stop} onCompact={() => void compactConversation()} onExport={() => void exportConversation()} onReloadMcp={() => void reloadSession()} attachments={attachments} onAddImages={files => void addImages(files)} onRemoveImage={id => updateAttachments(attachmentRef.current.filter(item => item.id !== id))} readingImages={readingImages} attachmentError={attachmentError} videos={videoUrls} onAddVideo={addVideoUrl} onRemoveVideo={removeVideoUrl} models={catalogModels.length ? catalogModels : snapshot.models ?? []} model={snapshot.model} onSelectModel={(provider, id) => void selectSessionModel(provider, id)} onRefreshModels={() => void connection.current?.loadModels()} onRetryModels={canRefreshModels ? onRetryModels : undefined} thinkingLevel={snapshot.thinkingLevel} thinkingLevels={snapshot.thinkingLevels ?? []} onThinkingLevel={level => void selectThinkingLevel(level)} />
           <SessionStatsBar stats={snapshot.stats} timing={timing} />
         </div>
       </div> : !snapshot.sessionId && !activePreview && !localSubmitted ? <div role="status" className="flex min-h-0 flex-1 items-center justify-center text-sm text-muted-foreground">Opening session…</div> : <div className="flex min-h-0 flex-1"><div className="flex min-w-[520px] flex-1 flex-col">
@@ -1281,10 +1287,10 @@ export function ChatWorkspace({ path, revision = 0, newSession = true, locked = 
         <div className="relative">
           <div className="mx-auto w-full max-w-3xl">
             {banners}
-            <AgentAction thinking={liveThinking} label="Working…" running={conversationProjection.running} elapsed={elapsed} settled={settled} />
+            <AgentAction thinking={liveThinking} label={waitingForPrompt ? "Waiting for your approval or answer…" : "Working…"} running={conversationProjection.running} elapsed={elapsed} settled={settled} />
           </div>
           {promptNode && <div className="absolute bottom-full left-1/2 z-20 mb-2 w-[min(48rem,calc(100vw-2rem))] -translate-x-1/2 px-3">{promptNode}</div>}
-          <Composer connected={snapshot.connected || !!activePreview} pending={snapshot.pending || commandBusy || (opening && !activePreview) || locked } opening={opening && !activePreview} starting={composerStarting} unavailable={!!sessionError} running={composerRunning} draft={draft} onDraft={updateDraft} onSend={() => void send()} onStop={stop} onCompact={() => void compactConversation()} onExport={() => void exportConversation()} onReloadMcp={() => void reloadSession()} attachments={attachments} onAddImages={files => void addImages(files)} onRemoveImage={id => updateAttachments(attachmentRef.current.filter(item => item.id !== id))} readingImages={readingImages} attachmentError={attachmentError} videos={videoUrls} onAddVideo={addVideoUrl} onRemoveVideo={removeVideoUrl} models={catalogModels.length ? catalogModels : snapshot.models ?? []} model={snapshot.model} onSelectModel={(provider, id) => void selectSessionModel(provider, id)} onRefreshModels={() => void connection.current?.loadModels()} onRetryModels={canRefreshModels ? onRetryModels : undefined} thinkingLevel={snapshot.thinkingLevel} thinkingLevels={snapshot.thinkingLevels ?? []} onThinkingLevel={level => void selectThinkingLevel(level)} textguard={textguardControl} />
+          <Composer connected={snapshot.connected || !!activePreview} pending={snapshot.pending || commandBusy || (opening && !activePreview) || locked } opening={opening && !activePreview} starting={composerStarting} unavailable={!!sessionError} running={composerRunning} waiting={waitingForPrompt} draft={draft} onDraft={updateDraft} onSend={() => void send()} onStop={stop} onCompact={() => void compactConversation()} onExport={() => void exportConversation()} onReloadMcp={() => void reloadSession()} attachments={attachments} onAddImages={files => void addImages(files)} onRemoveImage={id => updateAttachments(attachmentRef.current.filter(item => item.id !== id))} readingImages={readingImages} attachmentError={attachmentError} videos={videoUrls} onAddVideo={addVideoUrl} onRemoveVideo={removeVideoUrl} models={catalogModels.length ? catalogModels : snapshot.models ?? []} model={snapshot.model} onSelectModel={(provider, id) => void selectSessionModel(provider, id)} onRefreshModels={() => void connection.current?.loadModels()} onRetryModels={canRefreshModels ? onRetryModels : undefined} thinkingLevel={snapshot.thinkingLevel} thinkingLevels={snapshot.thinkingLevels ?? []} onThinkingLevel={level => void selectThinkingLevel(level)} textguard={textguardControl} />
         </div>
         <SessionStatsBar stats={snapshot.stats} timing={timing} />
         </div>

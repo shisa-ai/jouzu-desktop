@@ -410,7 +410,13 @@ export class SessionStore {
       if (ids.size) await Promise.all([...ids].map(id => this.session.cancel(id)));
       else if (turn) await this.session.interrupt();
     } catch (error) {
-      this.update({ error: describeError(error) });
+      const message = describeError(error);
+      // Stop did not reach the host; keep the rows retryable instead of making
+      // the user retype the message.
+      const current = this.state.outbox ?? [];
+      const restore = pending.filter(entry => !current.some(item => item.clientMessageId === entry.clientMessageId));
+      this.setOutbox([...current, ...restore.map(entry => ({ ...entry, state: "failed" as const, error: message }))]);
+      this.update({ activeTurn: turn, error: message });
     }
   }
 
@@ -539,10 +545,17 @@ export class SessionStore {
   private applySummary(data: Data): void {
     const prompts = promptsOf(data.pendingApprovals, data.pendingQuestions);
     const failed = record(data.failedTurn);
+    const selectedModel = record(data.model);
     this.update({
       sessionId: text(data.sessionId) ?? this.state.sessionId,
       sessionFile: text(data.sessionPath) ?? this.state.sessionFile,
       status: text(data.status) ?? this.state.status,
+      ...(selectedModel ? {
+        model: text(selectedModel.name) ?? text(selectedModel.id) ?? this.state.model,
+        modelProvider: text(selectedModel.provider) ?? this.state.modelProvider,
+        modelId: text(selectedModel.id) ?? this.state.modelId,
+      } : {}),
+      ...(text(data.thinkingLevel) ? { thinkingLevel: text(data.thinkingLevel) } : {}),
       ...("queue" in data ? { queue: queueOf(data.queue) } : {}),
       ...("failedTurn" in data ? { failedTurn: failed && text(failed.clientMessageId) ? { clientMessageId: text(failed.clientMessageId)!, text: text(failed.text) ?? "" } : null } : {}),
       ...(prompts ? { prompts } : {}),

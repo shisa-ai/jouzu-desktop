@@ -34,7 +34,9 @@ jobs:
       - name: RustSec audit
         run: |
           cargo install cargo-audit --locked
-          cargo audit
+          cargo audit --file apps/launcher/src-tauri/Cargo.lock
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cargo audit --file apps/launcher/host/Cargo.lock
       - name: Frontend build and unit tests
         run: |
           npm --prefix apps/launcher run build

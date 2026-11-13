@@ -996,12 +996,14 @@ async fn global_events(
             .collect();
         state.sessions.register_client(client_id, &capabilities);
     }
+    let global_guard = state.sessions.enter_global_client();
     let latest = state.events.latest_seq();
     let summaries = state.sessions.summaries();
     let sessions = state.sessions.clone();
     let mut receiver = state.events.subscribe();
     let events = state.events.clone();
     let stream = async_stream::stream! {
+        let _global_guard = global_guard;
         let mut last = after;
         if after == 0 {
             // A fresh client gets current summaries, not the entire history ring.
@@ -3421,8 +3423,30 @@ mod session_tests {
     }
 
     #[tokio::test]
-    async fn global_stream_client_can_answer_approvals() {
-        let (manager, _home, workspace) = manager_with_ui("confirm", None);
+    async fn a_global_stream_keeps_open_sessions_from_reaping() {
+        let (manager, _home, workspace) = manager(50);
+        let session = manager
+            .create(workspace.path().to_str().unwrap(), None, None)
+            .unwrap();
+        wait_status(&session, Status::Idle).await;
+
+        let guard = manager.enter_global_client();
+        manager.reap_idle(Duration::ZERO);
+        assert!(
+            manager.get(&session.id).is_some(),
+            "an open global stream must keep its sessions"
+        );
+
+        drop(guard);
+        manager.reap_idle(Duration::ZERO);
+        assert!(
+            manager.get(&session.id).is_none(),
+            "without a stream, the idle session can be reaped"
+        );
+    }
+
+    #[tokio::test]
+    async fn global_stream_client_can_answer_approvals() {        let (manager, _home, workspace) = manager_with_ui("confirm", None);
         let session = manager
             .create(workspace.path().to_str().unwrap(), None, None)
             .unwrap();

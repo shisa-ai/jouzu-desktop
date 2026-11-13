@@ -100,6 +100,15 @@ describe("SessionStore", () => {
     expect(store.snapshot.projection.running).toBe(false);
   });
 
+  it("takes the selected model from the host summary", () => {
+    const session = fakeSession();
+    const store = SessionStore.attach(session);
+    session.emit(event(1, "session.updated", { model: { provider: "shisa", id: "qwen-3.8", name: "Qwen 3.8" } }));
+    expect(store.snapshot.model).toBe("Qwen 3.8");
+    expect(store.snapshot.modelProvider).toBe("shisa");
+    expect(store.snapshot.modelId).toBe("qwen-3.8");
+  });
+
   it("shows a tool call in the live reply as soon as it starts", () => {
     const session = fakeSession();
     const store = SessionStore.attach(session);
