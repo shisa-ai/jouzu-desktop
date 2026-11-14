@@ -5,7 +5,7 @@
   "identifier": "ai.shisa.jouzu.desktop",
   "build": {
     "beforeDevCommand": "npm run dev",
-    "beforeBuildCommand": "npm run build",
+    "beforeBuildCommand": "npm run build:app",
     "frontendDist": "../dist",
     "additionalWatchFolders": [
       "../../../packaging/launcher"
@@ -44,7 +44,8 @@
     "publisher": "Shisa, Inc.",
     "copyright": "Copyright © Shisa, Inc.",
     "resources": {
-      "../host/target/release/jouzu-host.exe": "host/jouzu-host.exe"
+      "../host/target/package/jouzu-host.exe": "host/jouzu-host.exe",
+      "../dist/": "dist/"
     },
     "windows": {
       "nsis": {

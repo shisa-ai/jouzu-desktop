@@ -27,7 +27,7 @@ import {
 } from "./jouzu-api";
 
 function unsupported(): never {
-  throw new ApiError("invalid-request", "This host method is not implemented yet.", false);
+  throw new ApiError("invalid-request", "This action is not available in this version of Jouzu.", false);
 }
 
 function unavailableNative(): NativeApi {
@@ -38,6 +38,8 @@ function unavailableNative(): NativeApi {
     confirm: async options =>
       typeof window !== "undefined" ? window.confirm(options.message) : false,
     pickFolder: fail,
+    saveFile: fail,
+    onFileDrop: () => () => {},
     reveal: fail,
     openExternal: fail,
     terminal: fail,
@@ -50,6 +52,7 @@ function hostGroups(client: HostClient) {
   const sessions: SessionApi = {
     list: () => client.sessions(),
     attach: (workspacePath, sessionPath) => client.attach(workspacePath, sessionPath),
+    view: sessionId => client.view(sessionId),
     history: (sessionId, page) => client.history(sessionId, page),
     messages: (sessionPath, limit) => client.messages(sessionPath, limit),
     sanitizeImages: sessionPath => client.sanitizeSessionImages(sessionPath),
@@ -85,6 +88,9 @@ function hostGroups(client: HostClient) {
 
   const runtime: RuntimeApi = {
     status: () => client.status(),
+    warm: workspacePath => client.warm(workspacePath),
+    warmState: waitMs => client.warmState(waitMs),
+    mark: (mark, ids) => client.mark(mark, ids),
     components: async () => ({}),
     diagnostics: async () => null,
   };
@@ -122,18 +128,15 @@ function hostGroups(client: HostClient) {
     async run(sessionId, command) {
       await client.send(sessionId, command, `cmd-${crypto.randomUUID()}`);
     },
-    raw: (sessionId, command) => client.command(sessionId, command),
+    stats: sessionId => client.stats(sessionId),
     async compact(sessionId) {
-      await client.command(sessionId, { type: "compact" });
+      await client.compact(sessionId);
     },
     async exportHtml(sessionId, outputPath) {
-      await client.command(sessionId, { type: "export_html", outputPath });
+      await client.exportHtml(sessionId, outputPath);
     },
-    async reload(sessionId, sessionPath) {
-      if (!sessionPath) {
-        throw new ApiError("invalid-request", "sessionPath is required to reload a session.", false);
-      }
-      await client.command(sessionId, { type: "switch_session", sessionPath });
+    async reload(sessionId) {
+      await client.reload(sessionId);
     },
   };
 

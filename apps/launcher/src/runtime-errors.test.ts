@@ -20,3 +20,13 @@ test("other runtime errors are not rewritten", () => {
   expect(isCapacityError(null)).toBe(false);
   expect(isCapacityError("")).toBe(false);
 });
+
+test("errors read as sentences, never as class-prefixed exceptions", async () => {
+  const { describeError } = await import("./runtime-errors");
+  const { ApiError } = await import("./api/jouzu-api");
+  expect(describeError(new ApiError("runtime-unavailable", "The runtime is not ready", true))).toMatch(/not available/);
+  expect(describeError(new Error("Error: boom"))).toBe("boom");
+  expect(describeError("ApiError: host said no")).toBe("host said no");
+  expect(describeError(new ApiError("internal", "Host request failed (500)"))).toBe("Host request failed (500)");
+  expect(describeError(new Error("Submission retention limit reached"))).toBe(CAPACITY_MESSAGE);
+});

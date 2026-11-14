@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { ArrowUp, File, Folder, RefreshCw } from "lucide-react";
 import { Button } from "./components/ui/button";
 import { useApi } from "./api/context";
+import { ErrorLine } from "./session-alerts-view";
 
 interface Entry {
   name: string;
@@ -43,7 +44,7 @@ export function FilesPanel({ path }: { path: string }) {
       <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground" title={current}>{current}</span>
       <Button variant="ghost" className="size-7 shrink-0 p-0" aria-label="Refresh files" title="Refresh" onClick={() => void load(current)}><RefreshCw className="size-3.5" /></Button>
     </div>
-    {error && <p role="alert" className="p-2 text-xs text-destructive">{error}</p>}
+    {error && <div className="p-2"><ErrorLine raw={error} failed="Could not list this folder." /></div>}
     <div className="min-h-0 flex-1 overflow-auto py-1">
       {entries?.map(entry => <button
         key={entry.path}

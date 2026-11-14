@@ -10,10 +10,13 @@ name: Desktop release
 # published feed. Runtime provisioning is still open (0065); until it lands a
 # shell-only release cannot start chat on a clean machine.
 #
-# Manual until the first release exists. `publish` is the only path that writes to
-# the repository: it creates `v<version>` and replaces the feed on the stable
-# `desktop-update` release. Without `publish`, the run only proves the build and
-# keeps a workflow artifact.
+# Every build ships on QA first. `publish` is the only path that writes to the
+# repository: it creates the prerelease `v<version>` and replaces the QA feed on the
+# `desktop-update-qa` release. It never touches the stable feed; that is
+# desktop-promote.yml, which points stable at the same signed asset after QA.
+# Both feeds only move forward: release-guard.mjs refuses a version that is not newer
+# than what either feed serves, and a tag that already exists is never replaced.
+# Without `publish`, the run only proves the build and keeps a workflow artifact.
 
 on:
   workflow_dispatch:
@@ -29,7 +32,7 @@ on:
         type: string
         default: ''
       publish:
-        description: Create the version release and replace the desktop-update feed
+        description: Create the prerelease v<version> and replace the QA feed (desktop-update-qa)
         required: true
         type: boolean
         default: false
@@ -67,6 +70,16 @@ jobs:
             exit 1
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Refuse a version that is not newer than both feeds
+        if: ${{ inputs.publish }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version='${{ steps.check.outputs.version }}'
+          exists=-
+          if gh release view "v$version" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then exists=tag-exists; fi
+          node packaging/launcher/release-guard.mjs qa "$version" "$GITHUB_REPOSITORY" "$exists"
 
   windows:
     needs: prepare
@@ -214,35 +227,39 @@ jobs:
           fi
           node packaging/launcher/desktop-feed.mjs "$version" notes.md "$GITHUB_REPOSITORY" "$asset" "release/$asset.sig" latest.json
           cat latest.json
-      - name: Publish the version release
+      - name: Check the feeds again before writing
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version='${{ needs.prepare.outputs.version }}'
+          exists=-
+          if gh release view "v$version" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then exists=tag-exists; fi
+          node packaging/launcher/release-guard.mjs qa "$version" "$GITHUB_REPOSITORY" "$exists"
+      - name: Publish the QA prerelease
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           version='${{ needs.prepare.outputs.version }}'
           tag="v$version"
-          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
-            gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --notes-file notes.md
-          else
-            gh release create "$tag" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
-              --title "Jouzu Desktop $version" --notes-file notes.md
-          fi
+          gh release create "$tag" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease \
+            --title "Jouzu Desktop $version (QA)" --notes-file notes.md
           gh release upload "$tag" \
             "release/JouzuDesktop_${version}_x64-setup.exe" \
             "release/JouzuDesktop_${version}_x64-setup.exe.sig" \
             "release/SHA256SUMS.txt" \
             --repo "$GITHUB_REPOSITORY" --clobber
-      - name: Replace the update feed
+      - name: Replace the QA update feed
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if ! gh release view desktop-update --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
-            gh release create desktop-update --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease \
-              --title "Jouzu Desktop update feed" --notes "Signed desktop update feed. Do not delete."
+          if ! gh release view desktop-update-qa --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release create desktop-update-qa --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease \
+              --title "Jouzu Desktop QA update feed" --notes "Signed QA update feed. Do not delete."
           fi
-          gh release upload desktop-update latest.json --repo "$GITHUB_REPOSITORY" --clobber
+          gh release upload desktop-update-qa latest.json --repo "$GITHUB_REPOSITORY" --clobber
       - name: Verify the feed and the asset are anonymously readable
         run: |
-          endpoint="https://github.com/${GITHUB_REPOSITORY}/releases/download/desktop-update/latest.json"
+          endpoint="https://github.com/${GITHUB_REPOSITORY}/releases/download/desktop-update-qa/latest.json"
           for attempt in 1 2 3 4 5; do
             if curl -fsSL "$endpoint" -o published.json; then break; fi
             sleep 3

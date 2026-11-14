@@ -5,6 +5,7 @@
     "dev": "vite",
     "dev:isolated": "node scripts/dev-isolated.mjs",
     "build": "tsc --noEmit && vite build",
+    "build:app": "node scripts/build-app.mjs",
     "preview": "vite preview",
     "tauri": "tauri",
     "test": "vitest run",

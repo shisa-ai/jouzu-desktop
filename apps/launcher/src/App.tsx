@@ -4,6 +4,8 @@ import { ArtifactsPanel } from "./artifacts-panel";
 import { LauncherPage } from "./components/launcher-page";
 import { ProviderPicker } from "./components/ui/provider-picker";
 import { recoveryText } from "./recovery-text";
+import { describeError, explainError } from "./runtime-errors";
+import { NoticeRow } from "./session-alerts-view";
 import { UpdatePreview } from "./update-preview";
 import { GitBashSection, useGitBash } from "./git-bash-section";
 import { TerminalSection } from "./terminal-section";
@@ -18,6 +20,7 @@ import { catalogChangeSummary, parseControlState, type ControlState, type HeldCa
 
 import { controlCancel, controlRequest, subscribeControl } from "./api/control-client";
 import { useApi } from "./api/context";
+import type { WarmView } from "./warm-runtime";
 import { Switch } from "./components/ui/switch";
 import { listen } from "@tauri-apps/api/event";
 import jouzuIcon from "./assets/jouzu.svg";
@@ -40,7 +43,7 @@ import { catalogReview, messages, locales, resolveLocale, type Locale } from "./
 import { type Workspace } from "./history";
 import { parseDiagnostics, type Diagnostics } from "./diagnostics";
 interface LauncherState { platform: "windows" | "macos" | "linux"; recent: Workspace[]; ready: boolean; bash: boolean; bundled_git: boolean }
-interface Components { jouzu: string | null; development: boolean; launcherUpdaterConfigured?: boolean; jouzuUpdaterConfigured?: boolean }
+interface Components { jouzu: string | null; development: boolean; launcherUpdaterConfigured?: boolean; jouzuUpdaterConfigured?: boolean; build?: string; commit?: string }
 interface RuntimeReport { status?: string; version: string | null; expectedVersion?: string; versionCurrent?: boolean; minimumVersion?: string; verifiedVersions?: string[]; mandatory?: boolean; root: string | null; app: string | null; node: boolean; nodeVersion: string | null; nodeCurrent: boolean; git: boolean; terminal: boolean }
 type Theme = "dark" | "light" | "system";
 
@@ -75,6 +78,14 @@ export function App() {
   // The entry session connects behind the same loader the launcher starts with; after
   // that first connect, a session switch shows the chat's own "Starting session…".
   const [entryBooting, setEntryBooting] = useState(false);
+  const [entryWarm, setEntryWarm] = useState<WarmView | null>(null);
+  const [bootNow, setBootNow] = useState(() => Date.now());
+  const retryEntryWarm = useRef<() => void>(() => {});
+  useEffect(() => {
+    if (!entryBooting || entryReady.current) return;
+    const timer = window.setInterval(() => setBootNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [entryBooting]);
   const entryReady = useRef(false);
   const [restartPending, setRestartPending] = useState(false);
   const [catalogRefreshing, setCatalogRefreshing] = useState(false);
@@ -87,7 +98,16 @@ export function App() {
 
   useEffect(() => { document.documentElement.lang = locale; localStorage.setItem("jouzu.ui.language", locale); }, [locale]);
   const [state, setState] = useState<LauncherState | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  // An app-level failure is shown where it happened: settings in the settings
+  // window (and the setup page), folder actions with the folder list. Never a
+  // floating banner; the technical text stays behind Details.
+  const [error, setError] = useState<{ place: "settings" | "folders"; text: string; details?: string } | null>(null);
+  const fail = (place: "settings" | "folders", failure: unknown) => setError({ place, ...explainError(failure, t.error) });
+  // Failures nobody can act on (a window button, a copy, an event subscription) go to the log only.
+  const quiet = (failure: unknown) => console.warn("[jouzu]", describeError(failure));
+  const errorNotice = (place: "settings" | "folders") => error?.place === place
+    ? <NoticeRow alert={{ id: `app-${place}`, level: "error", text: error.text, details: error.details, actions: [], dismiss: () => setError(null) }} />
+    : null;
   // The first status read decides the whole window: the dot loader while it is in flight, the error and a retry if it never lands.
   const [statusError, setStatusError] = useState<string | null>(null);
   const [statusCopied, setStatusCopied] = useState(false);
@@ -96,7 +116,7 @@ export function App() {
   const [diagnostics, setDiagnostics] = useState<Diagnostics | null>(null);
   const [components, setComponents] = useState<Components | null>(null);
   const jouzuUpdater = useJouzuUpdate(components?.jouzuUpdaterConfigured === true, () => {
-    void invoke<Components>("component_versions").then(setComponents).catch(error => setError(String(error)));
+    void invoke<Components>("component_versions").then(setComponents).catch(error => fail("settings", error));
     // A runtime update is only visible to a fresh supervised process.
     requestSessionRestart();
   }, native);
@@ -151,12 +171,12 @@ export function App() {
   const [envLoaded, setEnvLoaded] = useState(false);
   async function readEnvironment() {
     try { setEnvRows(await api.settings.environment.read()); setEnvLoaded(true); setEditingEnv(null); }
-    catch (error) { setError(String(error)); }
+    catch (error) { fail("settings", error); }
   }
   async function saveEnvironment() {
     setOperation("saving"); setError(null);
     try { await api.settings.environment.save(envRows); setEditingEnv(null); setSetup(parseControlState(await controlRequest({ action: "status" }))); }
-    catch (error) { setError(String(error)); }
+    catch (error) { fail("settings", error); }
     finally { setOperation(null); }
   }
   const [custom, setCustom] = useState({provider:"",url:"",model:"",edit:false,imageInput:false,contextWindow:32768,maxTokens:4096});
@@ -191,7 +211,7 @@ export function App() {
       await refresh();
       if (paths.length && !activePath) setActivePath(paths[0]);
     }
-    catch (error) { setError(String(error)); }
+    catch (error) { fail("folders", error); }
     finally { setOperation(null); }
   }
   useEffect(() => {
@@ -207,7 +227,7 @@ export function App() {
       setDragging(inside && payload.type !== "drop");
       if (payload.type === "drop" && inside && !busyRef.current && !settingsOpen) void addFolders(payload.paths);
     });
-    subscription.then(unlisten => { if (disposed) unlisten(); }).catch(error => setError(String(error)));
+    subscription.then(unlisten => { if (disposed) unlisten(); }).catch(error => quiet(error));
     return () => { disposed = true; subscription.then(unlisten => unlisten()).catch(() => {}); };
   }, [settingsOpen]);
   function requestSessionRestart() {
@@ -227,7 +247,7 @@ export function App() {
       await readStatus();
     } catch (error) {
       prepareStarted.current = false;
-      setPrepare(current => ({ ...current, error: String(error) }));
+      setPrepare(current => ({ ...current, error: describeError(error) }));
     }
   }
 
@@ -252,7 +272,7 @@ export function App() {
         if (options.restart !== false && request.action !== "status" && request.action !== "import" && request.action !== "profile" && request.action !== "refresh-catalogs") requestSessionRestart();
         return next;
       }
-      catch (error) { setError(String(error)); return null; }
+      catch (error) { fail("settings", error); return null; }
       finally { if (mutates) setOperation(null); setDevice(null); setProviderDevice(null); }
     });
     controlQueue.current = run.catch(() => {});
@@ -263,7 +283,7 @@ export function App() {
     const run = controlQueue.current.then(async () => {
       setStatusError(null);
       try { setSetup(parseControlState(await controlRequest({ action: "status" }))); }
-      catch (error) { setStatusError(String(error)); }
+      catch (error) { setStatusError(describeError(error)); }
     });
     controlQueue.current = run.catch(() => {});
     return run;
@@ -282,13 +302,13 @@ export function App() {
     setSettingsTab("system");
     setSettingsOpen(true);
   }
-  async function copyStatusError() {
-    if (!statusError) return;
+  async function copyStatusError(text = statusError) {
+    if (!text) return;
     try {
-      if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(statusError);
-      else { const area = document.createElement("textarea"); area.value = statusError; area.style.position = "fixed"; area.style.opacity = "0"; document.body.appendChild(area); area.select(); document.execCommand("copy"); area.remove(); }
+      if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(text);
+      else { const area = document.createElement("textarea"); area.value = text; area.style.position = "fixed"; area.style.opacity = "0"; document.body.appendChild(area); area.select(); document.execCommand("copy"); area.remove(); }
       setStatusCopied(true); setTimeout(() => setStatusCopied(false), 2000);
-    } catch (error) { setError(String(error)); }
+    } catch (error) { quiet(error); }
   }
   useEffect(() => { if (!notice) return; const timer = setTimeout(() => setNotice(null), 4000); return () => clearTimeout(timer); }, [notice]);
   useEffect(() => { if (!settingsOpen) return; if (!setup && !busyRef.current) void configure({ action: "status" }); void readEnvironment(); }, [settingsOpen]);
@@ -300,7 +320,7 @@ export function App() {
   const refresh = async () => setState(workspaceState((await api.workspaces.list()) ?? []));
   const loadComponents = () => invoke<Components>("component_versions")
     .then(setComponents)
-    .catch(error => setError(String(error)));
+    .catch(error => fail("settings", error));
   // Diagnostics are separate from the launcher state: a missing record must not fail the window.
   const refreshDiagnostics = async () => {
     try { setDiagnostics(parseDiagnostics(await invoke<unknown>("diagnostics"))); }
@@ -321,12 +341,12 @@ export function App() {
         setRuntimePresent(true);
         void readStatus();
       } catch (error) {
-        setError(String(error));
+        fail("folders", error);
       }
     })();
     if (api.capabilities.native) {
       void refreshDiagnostics();
-      getVersion().then(setVersion).catch(error => setError(String(error)));
+      getVersion().then(setVersion).catch(error => fail("settings", error));
       void invoke<RuntimeReport>("runtime_report").then(report => {
         if (report?.mandatory === true || report?.nodeCurrent === false) { setRuntimePresent(false); return; }
         setRuntimePresent(true);
@@ -353,6 +373,8 @@ export function App() {
     });
     return () => { pending.then(unlisten => unlisten()).catch(() => {}); };
   }, []);
+  // When the window's code first runs: the gap from host start to here is the webview's.
+  useEffect(() => { api.runtime.mark?.("ui.boot"); }, []);
   const initialWorkspaceChosen = useRef(false);
   useEffect(() => {
     if (initialWorkspaceChosen.current || activePath || !state) return;
@@ -433,14 +455,14 @@ export function App() {
       await invoke("launch_jouzu", { path });
       setNotice("requested");
       await refresh();
-    } catch (error) { setError(String(error)); } finally { setOperation(null); }
+    } catch (error) { fail("folders", error); } finally { setOperation(null); }
   }
   async function chooseFolder() {
     setOperation("choosing"); setError(null);
     try {
       const path = await open({ directory: true, multiple: false, title: t.picker });
       if (typeof path === "string") { await addFolders([path]); setActivePath(path); }
-    } catch (error) { setError(String(error)); } finally { setOperation(null); }
+    } catch (error) { fail("folders", error); } finally { setOperation(null); }
   }
   async function forget(workspace: Workspace) {
     setOperation("saving"); setError(null);
@@ -450,7 +472,7 @@ export function App() {
       if (activePath === workspace.path) setActivePath(next);
       await refresh();
       setNotice("removed");
-    } catch (error) { setError(String(error)); } finally { setOperation(null); }
+    } catch (error) { fail("folders", error); } finally { setOperation(null); }
   }
   const recent = state?.recent.filter(item => item.path.toLocaleLowerCase().includes(query.toLocaleLowerCase())) ?? [];
   if (sort === "name") recent.sort((a,b) => a.path.replaceAll(String.fromCharCode(92), "/").split("/").at(-1)!.localeCompare(b.path.replaceAll(String.fromCharCode(92), "/").split("/").at(-1)!, locale));
@@ -464,7 +486,7 @@ export function App() {
   // the Shisa.AI card and must not appear again as a phantom provider row.
   const otherProviders = setup ? [...new Set([...setup.credentials.map(c => c.providerId), ...setup.customProviders.map(c => c.id)])].filter(id => id !== "shisa") : [];
   const providerApiKey = providerInfo?.apiKey !== false;
-  const providerContent = <div className="space-y-4">                  {(inlineProviders || !addingConnection) && <><Card className={inlineProviders ? "gap-3 rounded-none border-0 bg-transparent p-0 shadow-none" : "border-border gap-4 py-5 shadow-none"}><CardHeader className={inlineProviders ? "px-0" : undefined}><CardTitle>Shisa.AI</CardTitle><CardDescription>{device ? t.waitingAuthorization : setup?.account.signedIn ? t.shisaConnected : t.shisaHint}</CardDescription></CardHeader><CardContent className={inlineProviders ? "space-y-3 px-0" : "space-y-3"}>{!device && setup?.account.revocation === "unconfirmed" && <p role="status" className="text-sm text-muted-foreground">{t.signOutUnconfirmed}</p>}{!device && <div className="flex flex-wrap justify-end gap-2">{setup?.account.signedIn && <Button variant="outline" disabled={busy || catalogRefreshing || !setup} onClick={() => void refreshModelCatalog(true)}><RefreshCw className={catalogRefreshing ? "animate-spin" : undefined} />{t.refreshModels}</Button>}<Button disabled={busy || !setup} onClick={() => void configure({ action: setup?.account.signedIn ? "shisa-logout" : "shisa-login" })}>{setup?.account.signedIn ? t.signOut : t.signIn}</Button></div>}{device && <div className="space-y-3"><Input readOnly aria-label={t.loginUrl} value={device.url} onFocus={event => event.target.select()} /><Input readOnly aria-label={t.deviceCode} value={device.code} onFocus={event => event.target.select()} /><p className="text-xs text-muted-foreground">{t.loginHint}</p><div className="flex items-center justify-end gap-2"><Button variant="outline" onClick={() => void controlCancel()}>{t.cancel}</Button><Button onClick={async () => { try { const url = new URL(device.url); if (url.origin !== "https://platform.shisa.ai" || url.pathname !== "/connect" || url.username || url.password) throw new Error(t.loginUrl); await openUrl(url.href); } catch (error) { setError(String(error)); } }}><ArrowUpRight />{t.openBrowser}</Button></div></div>}</CardContent></Card>
+  const providerContent = <div className="space-y-4">                  {(inlineProviders || !addingConnection) && <><Card className={inlineProviders ? "gap-3 rounded-none border-0 bg-transparent p-0 shadow-none" : "border-border gap-4 py-5 shadow-none"}><CardHeader className={inlineProviders ? "px-0" : undefined}><CardTitle>Shisa.AI</CardTitle><CardDescription>{device ? t.waitingAuthorization : setup?.account.signedIn ? t.shisaConnected : t.shisaHint}</CardDescription></CardHeader><CardContent className={inlineProviders ? "space-y-3 px-0" : "space-y-3"}>{!device && setup?.account.revocation === "unconfirmed" && <p role="status" className="text-sm text-muted-foreground">{t.signOutUnconfirmed}</p>}{!device && <div className="flex flex-wrap justify-end gap-2">{setup?.account.signedIn && <Button variant="outline" disabled={busy || catalogRefreshing || !setup} onClick={() => void refreshModelCatalog(true)}><RefreshCw className={catalogRefreshing ? "animate-spin" : undefined} />{t.refreshModels}</Button>}<Button disabled={busy || !setup} onClick={() => void configure({ action: setup?.account.signedIn ? "shisa-logout" : "shisa-login" })}>{setup?.account.signedIn ? t.signOut : t.signIn}</Button></div>}{device && <div className="space-y-3"><Input readOnly aria-label={t.loginUrl} value={device.url} onFocus={event => event.target.select()} /><Input readOnly aria-label={t.deviceCode} value={device.code} onFocus={event => event.target.select()} /><p className="text-xs text-muted-foreground">{t.loginHint}</p><div className="flex items-center justify-end gap-2"><Button variant="outline" onClick={() => void controlCancel()}>{t.cancel}</Button><Button onClick={async () => { try { const url = new URL(device.url); if (url.origin !== "https://platform.shisa.ai" || url.pathname !== "/connect" || url.username || url.password) throw new Error(t.loginUrl); await openUrl(url.href); } catch (error) { fail("settings", error); } }}><ArrowUpRight />{t.openBrowser}</Button></div></div>}</CardContent></Card>
                   {!inlineProviders && <>                  <Card className="border-border gap-4 py-5 shadow-none"><CardHeader><CardTitle>{t.connections}</CardTitle></CardHeader><CardContent className="space-y-2">{!!setup && otherProviders.length > 5 && <Input aria-label={t.searchProviders} placeholder={t.searchProviders} value={providerQuery} onChange={event => setProviderQuery(event.target.value)} />}{!addingConnection && setup && otherProviders.filter(id => `${id} ${setup.providers.find(p => p.id === id)?.name ?? ""}`.toLowerCase().includes(providerQuery.toLowerCase())).map(id => ({providerId:id})).map(c => <div key={c.providerId} className="flex items-center gap-2"><Button variant="outline" className="h-auto min-w-0 flex-1 justify-between gap-2 py-3" disabled={busy} onClick={() => { setProvider(c.providerId); setToken(""); const saved = setup?.customProviders.find(p => p.id === c.providerId); setConnectionMode(saved?.editable ? "custom" : "builtin"); setCustom(saved?.editable ? {provider:saved.id,url:saved.url,model:saved.model,edit:true,imageInput:saved.imageInput ?? false,contextWindow:saved.contextWindow ?? 32768,maxTokens:saved.maxTokens ?? 4096} : {provider:"",url:"",model:"",edit:false,imageInput:false,contextWindow:32768,maxTokens:4096}); setAddingConnection(true); }}><span>{setup.providers.find(p => p.id === c.providerId)?.name ?? c.providerId}</span><span className="text-xs text-muted-foreground">{setup.credentials.some(key => key.providerId === c.providerId) ? t.credentialSaved : t.configuredNoKey}</span></Button></div>)}<Button variant="outline" disabled={busy || !setup} onClick={() => { setProviderQuery(""); setProvider(""); setConnectionMode("builtin"); setCustom({provider:"",url:"",model:"",edit:false,imageInput:false,contextWindow:32768,maxTokens:4096}); setAddingConnection(true); }}><Plus />{t.addConnection}</Button></CardContent></Card></>}</>}
                   {(inlineProviders || addingConnection) && <section className={inlineProviders ? "space-y-3 border-t border-border pt-4" : "space-y-4 rounded-xl border border-border bg-card p-5"}><div className="flex items-center justify-between gap-3"><h3 className="text-sm font-semibold">{inlineProviders ? t.connections : custom.edit ? t.editConnection : t.addConnection}</h3>{!inlineProviders && <Button variant="ghost" disabled={busy} onClick={() => setAddingConnection(false)}>{t.backConnections}</Button>}</div><div className="space-y-4">
                   <div className="space-y-2">{!inlineProviders && <Label>{t.service}</Label>}<ProviderPicker value={connectionMode === "custom" ? "__custom__" : provider} disabled={busy || custom.edit} label={t.service} placeholder={t.chooseService} searchLabel={t.searchProviders} empty={t.noResults} items={[...(setup?.providers ?? []),{id:"__custom__",name:t.customProvider}]} onChange={value => { setToken(""); if(value === "__custom__") {setConnectionMode("custom");setProvider("");} else {setConnectionMode("builtin");setProvider(value);} }}/></div>
@@ -472,13 +494,12 @@ export function App() {
                   {connectionMode === "builtin" && provider &&
                   <div className="space-y-4 border-t border-border pt-4">
 
-                    {provider && <>{providerOauth && <div className="space-y-3 rounded-lg border border-border p-3"><p className="text-sm text-muted-foreground">{providerInfo?.oauthName ?? t.oauthHint}</p>{providerSignedIn ? <div className="flex items-center justify-between gap-2"><span className="text-sm">{t.oauthConnected}</span><Button variant="outline" disabled={busy} onClick={() => void configure({ action: "provider-remove", provider })}>{t.removeCredential}</Button></div> : <div className="flex justify-end"><Button disabled={busy} onClick={async () => { await configure({ action: "provider-oauth", provider }); }}>{t.oauthSignIn}</Button></div>}{providerDevice?.provider === provider && <div className="space-y-3"><Input readOnly aria-label={t.loginUrl} value={providerDevice.url} onFocus={event => event.target.select()} />{providerDevice.code && <Input readOnly aria-label={t.deviceCode} value={providerDevice.code} onFocus={event => event.target.select()} />}<p className="text-xs text-muted-foreground">{t.loginHint}</p><div className="flex items-center justify-end gap-2"><Button variant="outline" onClick={() => void controlCancel()}>{t.cancel}</Button><Button onClick={async () => { try { await openDeviceUrl(providerDevice.url); } catch (error) { setError(String(error)); } }}><ArrowUpRight />{t.openBrowser}</Button></div></div>}</div>}{providerApiKey && <><Label>{t.apiKey}</Label><Input type="password" autoComplete="off" aria-label={t.apiKey} placeholder={t.apiKey} value={token} onChange={event => setToken(event.target.value)} /><div className="flex justify-end gap-2"><Button disabled={busy || !token.trim()} onClick={async () => { if (await configure({ action: "provider-key", provider, token })) { setToken(""); setAddingConnection(false); } }}>{t.save}</Button>{setup?.credentials.some(c => c.providerId === provider) && <Button variant="outline" disabled={busy} onClick={() => void configure({ action: "provider-remove", provider })}>{t.removeCredential}</Button>}</div></>}
+                    {provider && <>{providerOauth && <div className="space-y-3 rounded-lg border border-border p-3"><p className="text-sm text-muted-foreground">{providerInfo?.oauthName ?? t.oauthHint}</p>{providerSignedIn ? <div className="flex items-center justify-between gap-2"><span className="text-sm">{t.oauthConnected}</span><Button variant="outline" disabled={busy} onClick={() => void configure({ action: "provider-remove", provider })}>{t.removeCredential}</Button></div> : <div className="flex justify-end"><Button disabled={busy} onClick={async () => { await configure({ action: "provider-oauth", provider }); }}>{t.oauthSignIn}</Button></div>}{providerDevice?.provider === provider && <div className="space-y-3"><Input readOnly aria-label={t.loginUrl} value={providerDevice.url} onFocus={event => event.target.select()} />{providerDevice.code && <Input readOnly aria-label={t.deviceCode} value={providerDevice.code} onFocus={event => event.target.select()} />}<p className="text-xs text-muted-foreground">{t.loginHint}</p><div className="flex items-center justify-end gap-2"><Button variant="outline" onClick={() => void controlCancel()}>{t.cancel}</Button><Button onClick={async () => { try { await openDeviceUrl(providerDevice.url); } catch (error) { fail("settings", error); } }}><ArrowUpRight />{t.openBrowser}</Button></div></div>}</div>}{providerApiKey && <><Label>{t.apiKey}</Label><Input type="password" autoComplete="off" aria-label={t.apiKey} placeholder={t.apiKey} value={token} onChange={event => setToken(event.target.value)} /><div className="flex justify-end gap-2"><Button disabled={busy || !token.trim()} onClick={async () => { if (await configure({ action: "provider-key", provider, token })) { setToken(""); setAddingConnection(false); } }}>{t.save}</Button>{setup?.credentials.some(c => c.providerId === provider) && <Button variant="outline" disabled={busy} onClick={() => void configure({ action: "provider-remove", provider })}>{t.removeCredential}</Button>}</div></>}
                     <Label>{t.defaultModel}</Label><Select value={setup?.defaultProvider === provider ? setup.defaultModel : ""} onValueChange={model => void configure({ action: "default-model", provider, model })}><SelectTrigger className="w-full" aria-label={t.defaultModel}><SelectValue placeholder={t.defaultModel} /></SelectTrigger><SelectContent>{setup?.models.filter(m => m.provider === provider).map(m => <SelectItem key={m.id} value={m.id}>{m.name}</SelectItem>)}</SelectContent></Select></>}
                   </div>}
                   {connectionMode === "custom" &&<div className="space-y-3 border-t border-border pt-4"><p className="text-sm text-muted-foreground">{t.customHint}</p><Label>{t.providerId}</Label><Input placeholder={t.providerId} aria-label={t.providerId} disabled={custom.edit} value={custom.provider} onChange={event => setCustom({...custom,provider:event.target.value})} /><Label>{t.endpoint}</Label><Input placeholder={t.endpoint} aria-label={t.endpoint} value={custom.url} onChange={event => setCustom({...custom,url:event.target.value})} /><Label>{t.modelId}</Label><Input placeholder={t.modelId} aria-label={t.modelId} value={custom.model} onChange={event => setCustom({...custom,model:event.target.value})} /><div className="flex items-center justify-between gap-3"><Label htmlFor="custom-image-input">{t.imageInput}</Label><Switch id="custom-image-input" checked={custom.imageInput} onCheckedChange={imageInput => setCustom(value=>({...value,imageInput}))} /></div><p className="text-xs text-muted-foreground">{t.imageInputHint}</p><Label>{t.contextWindow}</Label><Input type="number" min={1024} max={2000000} step={1024} aria-label={t.contextWindow} value={custom.contextWindow} onChange={event => setCustom(value=>({...value,contextWindow:Number(event.target.value)}))} /><p className="text-xs text-muted-foreground">{t.contextWindowHint}</p><Label>{t.maxOutput}</Label><Input type="number" min={1} max={custom.contextWindow} step={1} aria-label={t.maxOutput} value={custom.maxTokens} onChange={event => setCustom(value=>({...value,maxTokens:Number(event.target.value)}))} /><p className="text-xs text-muted-foreground">{t.maxOutputHint}</p><Label>{t.apiKey}</Label><Input type="password" autoComplete="off" aria-label={t.apiKey} placeholder={t.apiKey} value={token} onChange={event=>setToken(event.target.value)}/><div className="flex justify-end pt-1"><Button disabled={busy || !custom.provider || !custom.url || !custom.model} onClick={async () => { if (await configure({action:"custom-provider",...custom})) { setCustom(value=>({...value,edit:true})); if (token.trim() && !await configure({action:"provider-key",provider:custom.provider,token})) return; setToken("");setAddingConnection(false); } }}>{t.save}</Button></div></div>}
                   </div></section>}
 </div>;
-  const errorBanner = error && <div role="alert" className="fixed left-1/2 top-4 z-[60] flex w-[min(42rem,calc(100vw-2rem))] -translate-x-1/2 items-start justify-between gap-3 rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-900 shadow-xl"><div><p className="font-medium">{t.error}</p><details className="mt-2 break-all"><summary className="cursor-pointer">{t.details}</summary><p className="mt-2">{error}</p></details></div><button onClick={() => setError(null)} aria-label={t.dismiss}><X className="size-4" /></button></div>;
   // One banner for every first-run screen. `fill` lets the banner take the height
   // that a prepare or loading page would otherwise leave empty. The look is the
   // approved prepare page: cyan wash, one glow, mark and wordmark.
@@ -494,18 +515,21 @@ export function App() {
   // The first-run pages have no titlebar of their own; without these a loading
   // window cannot be closed.
   const firstRunControls = <div className="fixed right-2 top-2 z-50 flex items-center gap-1">{api.capabilities.native && <>
-    <Button variant="ghost" aria-label={t.minimize} title={t.minimize} onClick={() => getCurrentWindow().minimize().catch(error => setError(String(error)))}><Minus /></Button>
-    <Button variant="ghost" aria-label="Close launcher" title={t.dismiss} onClick={() => getCurrentWindow().close().catch(error => setError(String(error)))}><X /></Button>
+    <Button variant="ghost" aria-label={t.minimize} title={t.minimize} onClick={() => getCurrentWindow().minimize().catch(error => quiet(error))}><Minus /></Button>
+    <Button variant="ghost" aria-label="Close launcher" title={t.dismiss} onClick={() => getCurrentWindow().close().catch(error => quiet(error))}><X /></Button>
   </>}</div>;
-  const connectingScreen = <main className="flex h-screen w-full flex-col overflow-hidden bg-background">
+  // The one loading page: its title line says what is happening; a failure shows
+  // below it with the detail to copy and a retry.
+  const loadingScreen = (title: string, failure?: { message: string; detail: string; onRetry: () => void }) => <main className="fixed inset-0 z-40 flex h-screen w-full flex-col overflow-hidden bg-background">
     {firstRunControls}
-    {onboardingBanner(t.connecting, undefined, 0.7, true)}
-    <section aria-label={t.connecting} className="flex shrink-0 flex-col items-center gap-4 px-6 pb-14 pt-8">
-      <span role="status" aria-live="polite" className="sr-only">{t.connecting}</span>
+    {onboardingBanner(title, undefined, 0.7, true)}
+    <section aria-label={title} className="flex shrink-0 flex-col items-center gap-4 px-6 pb-14 pt-8">
+      <span role="status" aria-live="polite" className="sr-only">{title}</span>
       <Progress value={null} className="w-full max-w-xl" />
-      {statusError && <div className="flex w-full max-w-xl flex-col items-center gap-3"><p className="text-sm text-muted-foreground" role="alert">{t.connectFailed}</p><div className="flex w-full items-center gap-2 rounded-lg border border-border bg-card py-2 pl-3 pr-1"><code className="select-text min-w-0 flex-1 truncate text-xs text-muted-foreground" title={statusError}>{statusError}</code><Button variant="ghost" className="shrink-0" aria-label={t.copy} title={t.copy} onClick={() => void copyStatusError()}>{statusCopied ? <Check className="text-primary" /> : <Copy />}</Button></div><Button onClick={() => void readStatus()}>{t.retry}</Button></div>}
+      {failure && <div className="flex w-full max-w-xl flex-col items-center gap-3"><p className="text-sm text-muted-foreground" role="alert">{failure.message}</p><div className="flex w-full items-center gap-2 rounded-lg border border-border bg-card py-2 pl-3 pr-1"><code className="select-text min-w-0 flex-1 truncate text-xs text-muted-foreground" title={failure.detail}>{failure.detail}</code><Button variant="ghost" className="shrink-0" aria-label={t.copy} title={t.copy} onClick={() => void copyStatusError(failure.detail)}>{statusCopied ? <Check className="text-primary" /> : <Copy />}</Button></div><Button onClick={failure.onRetry}>{t.retry}</Button></div>}
     </section>
   </main>;
+  const connectingScreen = loadingScreen(t.connecting, statusError ? { message: t.connectFailed, detail: statusError, onRetry: () => void readStatus() } : undefined);
   const preparePercent = prepare.phase === "node" && prepare.total ? Math.max(3, (prepare.downloaded / prepare.total) * 40) : prepare.phase === "packages" ? 55 : prepare.phase === "verify" ? 90 : prepare.phase === "tools" ? 95 : 6;
   // A launcher-style prepare page: banner, one bar, no choices. It belongs to the
   // runtime step of the same state machine.
@@ -522,11 +546,11 @@ export function App() {
   // No language step: the one setup page left is connecting a model.
   const modelSetupScreen = <main className="flex h-screen w-full flex-col overflow-hidden bg-background">
     {firstRunControls}
-    {errorBanner}
     {onboardingBanner(t.setupConnect, undefined, 0.55, false, true)}
     <div className="flex min-h-0 flex-1 justify-center overflow-auto px-6 py-8">
       <div data-slot="page-body" className="onboarding-card m-auto w-full max-w-2xl rounded-2xl border border-border bg-card/70 p-6 shadow-[0_28px_70px_-40px_rgba(0,0,0,0.95)] backdrop-blur-sm sm:p-8">
         <p className="mb-6 text-sm leading-relaxed text-muted-foreground">{t.setupHint}</p>
+        {error?.place === "settings" && <div className="mb-4">{errorNotice("settings")}</div>}
         {providerContent}
       </div>
     </div>
@@ -538,12 +562,12 @@ export function App() {
     <span role="status" aria-live="polite" className="sr-only">{busy || notice ? (operation === "preparing" ? t.preparing : operation === "launching" ? t.launching : operation === "choosing" ? t.choosing : operation === "saving" ? t.saving : notice ? t[notice] : null) : state && !state.ready ? t.repair : ""}</span>
     <header data-tauri-drag-region className="flex items-center justify-between border-b border-border px-4 py-2">
       <div className="absolute left-0 right-0 top-0 h-3" data-tauri-drag-region />
-      <div className="pointer-events-none flex items-center gap-2"><img src={jouzuIcon} alt="" draggable={false} className="size-7" /><h1 className="min-w-16 flex-1 text-sm font-semibold tracking-tight">Jouzu</h1>{import.meta.env.DEV && <span className="rounded border border-amber-500/40 bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-medium text-amber-600">DEV 1.0.12</span>}</div>
+      <div className="pointer-events-none flex items-center gap-2"><img src={jouzuIcon} alt="" draggable={false} className="size-7" /><h1 className="min-w-16 flex-1 text-sm font-semibold tracking-tight">Jouzu</h1>{import.meta.env.DEV && <span className="rounded border border-amber-500/40 bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-medium text-amber-600">DEV</span>}</div>
       <div className="pointer-events-none flex items-center gap-1 [&>*]:pointer-events-auto"><Dialog modal={false} open={settingsOpen} onOpenChange={value => { if (!value && device) void controlCancel(); if (!value) setUpdateFocus(null); setSettingsOpen(value); }}>
         {/* The dialog must stay open on an outside click and must not let the view behind it be used. A non-modal dialog keeps the background interactive, so shield it. */}
         {settingsOpen && <div aria-hidden="true" data-settings-shield className="fixed inset-0 z-40" onPointerDown={event => event.preventDefault()} onWheel={event => event.preventDefault()} />}
         <DialogContent showCloseButton={false} onInteractOutside={event => event.preventDefault()} onPointerDownOutside={event => event.preventDefault()} className="flex h-[min(560px,85dvh)] max-w-[calc(100%-2rem)] flex-col gap-0 overflow-hidden rounded-2xl border-border p-0 sm:max-w-3xl">
-          {error && <p role="alert" className="border-b border-border bg-red-50 px-4 py-2 text-sm text-red-900">{error}</p>}
+          {error?.place === "settings" && <div className="border-b border-border p-2">{errorNotice("settings")}</div>}
           <DialogDescription className="sr-only">{t.preferences}</DialogDescription>
           <Tabs value={settingsTab} onValueChange={setSettingsTab} orientation="vertical" className="min-h-0 flex-1 gap-0">
             <aside className="w-36 shrink-0 border-r border-border bg-muted/60 p-3 sm:w-48">
@@ -587,18 +611,19 @@ export function App() {
                   
                   <UpdatePreview locale={locale} focusIndex={updateFocus} live={{
                     phases:[jouzuUpdater.phase === 'preparing' || jouzuUpdater.phase === 'verifying' || jouzuUpdater.phase === 'activating' || jouzuUpdater.phase === 'staged' ? 'installing' : jouzuUpdater.phase as 'idle'|'checking'|'available'|'current'|'downloading'|'installing'|'complete'|'error', updater.phase],
-                    versions:[components?.jouzu ?? t.unavailable, version ?? t.unavailable],
+                    versions:[components?.jouzu ?? t.unavailable, version ? (components?.commit && components.commit !== 'unknown' ? `${version} · ${components.commit} · ${components.build ?? ''}` : version) : t.unavailable],
                     targets:[jouzuUpdater.version,updater.version],
                     progress:jouzuUpdater.busy?jouzuUpdater.progress:updater.progress,
                     configured:[!!components?.jouzuUpdaterConfigured,!!components?.launcherUpdaterConfigured],
                     errors:[jouzuUpdater.error,updater.error],
                     notes:[jouzuUpdater.notes ?? '',updater.notes ?? ''],
                     sources:[jouzuUpdater.notesSource ?? '', ''],
+                    channel: updater.channel && components?.launcherUpdaterConfigured ? { value: updater.channel, set: value => void updater.setChannel(value), downgrade: updater.downgrade } : undefined,
                     repair: components?.jouzu || import.meta.env.DEV ? undefined : { label: recoveryText[locale].action, run: () => { void (async () => {
                       if (!await confirm(recoveryText[locale].description, {title: recoveryText[locale].title, kind: "warning"})) return;
                       setOperation("saving"); setError(null);
                       try { await invoke("repair_jouzu"); setComponents(await invoke<Components>("component_versions")); await refresh(); await refreshDiagnostics(); }
-                      catch (failure) { setError(String(failure)); } finally { setOperation(null); }
+                      catch (failure) { fail("settings", failure); } finally { setOperation(null); }
                     })(); } },
                     check:()=>{void jouzuUpdater.check();void updater.refresh();},
                     install:index=>{if(index===0)void jouzuUpdater.install();else void updater.install();}
@@ -619,7 +644,7 @@ export function App() {
           </Tabs>
         </DialogContent>
       </Dialog>
-      {api.capabilities.native && <><Button variant="ghost" aria-label={t.minimize} onClick={() => getCurrentWindow().minimize().catch(error => setError(String(error)))}><Minus /></Button><Button variant="ghost" aria-label={maximized ? "Restore" : "Maximize"} onClick={() => getCurrentWindow().toggleMaximize().catch(error => setError(String(error)))}>{maximized ? <Minimize2 /> : <Maximize2 />}</Button><Button variant="ghost" aria-label="Hide to tray" title="Hide to tray" onClick={() => getCurrentWindow().close().catch(error => setError(String(error)))}><X /></Button></>}
+      {api.capabilities.native && <><Button variant="ghost" aria-label={t.minimize} onClick={() => getCurrentWindow().minimize().catch(error => quiet(error))}><Minus /></Button><Button variant="ghost" aria-label={maximized ? "Restore" : "Maximize"} onClick={() => getCurrentWindow().toggleMaximize().catch(error => quiet(error))}>{maximized ? <Minimize2 /> : <Maximize2 />}</Button><Button variant="ghost" aria-label="Hide to tray" title="Hide to tray" onClick={() => getCurrentWindow().close().catch(error => quiet(error))}><X /></Button></>}
       </div>
     </header>
       <Dialog open={repair !== null} onOpenChange={open => { if (!open) setRepair(null); }}>
@@ -650,11 +675,10 @@ export function App() {
           </div>
         </DialogContent>
       </Dialog>
-      {entryBooting && !entryReady.current && <div className="fixed inset-0 z-40 flex h-screen w-full flex-col bg-background">
-      {onboardingBanner(t.connecting, undefined, 0.7, true)}
-      <div className="flex shrink-0 justify-center px-6 pb-14 pt-8"><Progress value={null} className="w-full max-w-xl" /></div>
-    </div>}
-    {errorBanner}
+      {entryBooting && !entryReady.current && loadingScreen(
+        entryWarm?.state === "starting" && entryWarm.since !== null ? t.warming.replace("{s}", String(Math.max(0, Math.round((bootNow - entryWarm.since) / 1000)))) : t.connecting,
+        entryWarm?.state === "failed" ? { message: t.warmingFailed, detail: entryWarm.error ?? "", onRetry: () => retryEntryWarm.current() } : undefined,
+      )}
     {activePath && <div className="flex min-h-0 flex-1">
       <ChatWorkspace
         path={activePath}
@@ -663,13 +687,12 @@ export function App() {
         onStartSession={() => setNewSession(false)}
         onRetry={() => setSessionRevision(value => value + 1)}
         onBusyChange={setChatBusy}
-        onBootChange={booting => {
+        onBootChange={(booting, warm, retryWarm) => {
+          setEntryWarm(warm);
+          retryEntryWarm.current = retryWarm;
           setEntryBooting(booting);
-          if (!booting) { entryReady.current = true; return; }
-          // Safety: a session that never reports "connected" must not keep the
-          // whole window behind the loader. The chat then shows its own line.
-          if (entryReady.current) return;
-          window.setTimeout(() => { if (!entryReady.current) { entryReady.current = true; setEntryBooting(false); } }, 8000);
+          if (!booting && !entryReady.current) requestAnimationFrame(() => api.runtime.mark?.("loading.ready"));
+          if (!booting) entryReady.current = true;
         }}
         catalogRefreshing={catalogRefreshing}
         canRefreshModels={setup?.account.signedIn === true}
@@ -679,6 +702,7 @@ export function App() {
         onSelect={setActivePath}
         onAddFolder={() => void chooseFolder()}
         onRemove={id => { const workspace = state?.recent.find(item => item.id === id); if (workspace) void forget(workspace); }}
+        folderNotice={errorNotice("folders")}
 
         onSettings={() => setSettingsOpen(true)}
         onUpdate={openUpdatePanel}
@@ -687,6 +711,7 @@ export function App() {
       />
     </div>}
     {!activePath && <LauncherPage title={t.heading} description={t.intro}>
+      {error?.place === "folders" && <div className="mx-auto w-full max-w-xl px-6 pt-6">{errorNotice("folders")}</div>}
       <div className="flex min-h-0 flex-1 items-center justify-center gap-2 p-6"><Button onClick={() => void chooseFolder()} disabled={!state || busy}><Plus />{t.addFolder}</Button><Button variant="outline" onClick={() => setSettingsOpen(true)}>{t.settings}</Button></div>
     </LauncherPage>}
     </main>;

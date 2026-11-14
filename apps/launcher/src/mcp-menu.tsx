@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useApi } from "./api/context";
 import { ChevronDown, Circle, LoaderCircle, Plug, RefreshCw } from "lucide-react";
 import { Button } from "./components/ui/button";
+import { ErrorLine } from "./session-alerts-view";
 
 interface McpServer {
   name: string;
@@ -55,7 +56,7 @@ export function McpMenu({ onReload, onAsk }: { onReload: () => void; onAsk?: () 
         <span className="text-xs font-semibold">MCP servers</span>
       </div>
       {loading && <div role="status" className="flex items-center gap-2 px-3 py-3 text-xs text-muted-foreground"><LoaderCircle className="size-3.5 animate-spin" />Loading…</div>}
-      {error && <p role="alert" className="border-b border-destructive/30 bg-destructive/10 px-3 py-2 text-[11px] text-destructive">{error}</p>}
+      {error && <div className="border-b border-border p-2"><ErrorLine raw={error} failed="Could not read the MCP servers." /></div>}
       {!loading && !error && <div className="max-h-[min(24rem,60vh)] overflow-y-auto px-3 py-2">
         {config?.servers.map(server => <div key={server.name} className="flex items-center gap-2 border-b border-border py-1.5 last:border-0">
           <Circle className="size-2.5 shrink-0 fill-primary text-primary" aria-hidden="true" />

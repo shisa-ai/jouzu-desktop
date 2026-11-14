@@ -3,6 +3,7 @@ import { useApi } from "./api/context";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./components/ui/card";
 import { Label } from "./components/ui/label";
 import { Switch } from "./components/ui/switch";
+import { ErrorLine } from "./session-alerts-view";
 
 interface ImageSettings {
   enabled: boolean;
@@ -147,7 +148,7 @@ export function ToolsPanel() {
           </select>
         </label>
       </div>
-      {error && <p role="alert" className="text-xs text-destructive">{error}</p>}
+      {error && <ErrorLine raw={error} failed="This tools change did not complete." onDismiss={() => setError(null)} />}
       <div className="border-t border-border pt-3 text-xs text-muted-foreground">
         Reviewed calls: {tools.reviewTools.join(", ")}
       </div>

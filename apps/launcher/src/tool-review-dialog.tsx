@@ -23,7 +23,7 @@ function reviewInfo(body: string): ReviewInfo | null {
  * a new reviewed tool needs no new UI; only the body changes. Structured bodies
  * (the image tool) get fields; anything else falls back to plain text.
  */
-export function ToolReviewDialog({ title, body, options, disabled, onSelect, onCancel }: { title: string; body: string; options: readonly string[]; disabled: boolean; onSelect: (value: string) => void; onCancel: () => void }) {
+export function ToolReviewDialog({ title, body, options, disabled, onSelect, onCancel }: { title: string; body: string; options: readonly string[]; disabled: boolean; onSelect: (value: string) => void; onCancel?: () => void }) {
   const info = reviewInfo(body);
   const count = info?.images ?? 1;
   return <section role="dialog" aria-modal="false" aria-label={title} className="w-full rounded-xl border border-border bg-card p-4 shadow-xl">
@@ -37,7 +37,7 @@ export function ToolReviewDialog({ title, body, options, disabled, onSelect, onC
       <p className="mt-1 text-[11px] text-muted-foreground">This runs {count} paid image generation{count === 1 ? "" : "s"}.</p>
     </> : body && <p className="mt-2 whitespace-pre-line text-sm text-muted-foreground">{body}</p>}
     <div className="mt-4 flex flex-wrap justify-end gap-2">
-      <Button variant="ghost" disabled={disabled} onClick={onCancel}>Cancel</Button>
+      {onCancel && <Button variant="ghost" disabled={disabled} onClick={onCancel}>Cancel</Button>}
       {options.map(option => <Button key={option} variant={option === "Approve" ? "default" : "outline"} className={option === "Deny" ? "text-destructive" : ""} disabled={disabled} onClick={() => onSelect(option)}>{option}</Button>)}
     </div>
   </section>;

@@ -19,6 +19,7 @@ export type ApiErrorCode =
   | "capability-unavailable"
   | "unauthorized"
   | "forbidden"
+  | "prompt-forbidden"
   | "invalid-request"
   | "session-not-found"
   | "prompt-resolved"
@@ -88,6 +89,8 @@ export interface OutgoingMessage {
 export interface Receipt {
   messageId: string;
   receipt: string;
+  /** The session was busy: the message waits in its queue until the runtime uses it. */
+  waiting?: boolean;
 }
 
 export interface HistoryRow {
@@ -134,6 +137,9 @@ export interface Model {
   cost?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number };
   reasoning?: boolean;
   thinkingLevels?: string[];
+  /** False when the runtime cannot use this model now; `unavailableReason` says why. */
+  available?: boolean;
+  unavailableReason?: string | null;
 }
 
 export interface RuntimeStatus {
@@ -179,6 +185,8 @@ export interface EnvironmentEntry {
 export interface SessionApi {
   list(): Promise<SessionSummary[]>;
   attach(workspacePath: string, sessionPath?: string): Promise<SessionHandle>;
+  /** This client shows the session now; the host streams its content here again. */
+  view?(sessionId: string): Promise<void>;
   history(sessionId: string, page?: { limit?: number; before?: number }): Promise<HistoryPage>;
   messages(sessionPath: string, limit?: number): Promise<unknown[]>;
   send(sessionId: string, message: OutgoingMessage): Promise<Receipt>;
@@ -200,8 +208,26 @@ export interface PromptApi {
   answer(questionId: string, answers: Record<string, string>): Promise<void>;
 }
 
+/** The runtime the host starts ahead of need (see the host's warm pool). */
+export interface WarmRuntime {
+  state: "off" | "starting" | "ready" | "failed";
+  /** Milliseconds since this warm-up started. */
+  elapsedMs?: number | null;
+  readyMs?: number | null;
+  error?: string | null;
+  workspace?: string | null;
+}
+
+export type TimingMark = "ui.boot" | "loading.ready" | "message.shown" | "first_output.shown" | "stop.shown";
+
 export interface RuntimeApi {
   status(): Promise<RuntimeStatus>;
+  /** Warm the runtime for this workspace; returns the warm-up state. */
+  warm(workspacePath: string): Promise<WarmRuntime>;
+  /** The warm-up state, waiting up to `waitMs` for it to settle. */
+  warmState(waitMs: number): Promise<WarmRuntime>;
+  /** Record a moment the user saw (host.log `timing.ui`). Best effort: never throws. */
+  mark?(mark: TimingMark, ids?: { sessionId?: string; clientMessageId?: string }): void;
   components(): Promise<Record<string, unknown>>;
   diagnostics(): Promise<unknown | null>;
 }
@@ -231,10 +257,12 @@ export interface McpApi {
 
 export interface CommandApi {
   run(sessionId: string, command: string): Promise<void>;
-  raw(sessionId: string, command: Record<string, unknown>): Promise<unknown>;
+  /** Usage counters; null while the session has no runtime yet. */
+  stats(sessionId: string): Promise<unknown>;
   compact(sessionId: string): Promise<void>;
   exportHtml(sessionId: string, outputPath: string): Promise<void>;
-  reload(sessionId: string, sessionPath?: string): Promise<void>;
+  /** Re-read the session's own saved file; the host knows which file that is. */
+  reload(sessionId: string): Promise<void>;
 }
 
 export interface ArtifactApi {
@@ -264,6 +292,13 @@ export interface SettingsApi {
 export interface NativeApi {
   confirm(options: { message: string; title?: string }): Promise<boolean>;
   pickFolder(): Promise<string | null>;
+  /** Ask where to save a file; null when the user cancels. */
+  saveFile(options: { title: string; defaultPath: string; filters?: Array<{ name: string; extensions: string[] }> }): Promise<string | null>;
+  /**
+   * Files dropped onto the window. `position` is in CSS pixels. Returns an
+   * unsubscribe function; a shell without native drag and drop never calls back.
+   */
+  onFileDrop(listener: (event: { type: "over" | "drop" | "leave"; paths: string[]; position?: { x: number; y: number } }) => void): () => void;
   reveal(path: string): Promise<void>;
   openExternal(url: string): Promise<void>;
   terminal(path?: string): Promise<void>;

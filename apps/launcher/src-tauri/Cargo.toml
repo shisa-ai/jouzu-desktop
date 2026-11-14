@@ -31,7 +31,7 @@ tauri-plugin-single-instance = "2"
 # The renderer failure record reads WebView2's own event, which Tauri hands over through with_webview.
 [target.'cfg(windows)'.dependencies]
 webview2-com = "0.39"
-windows = { version = "0.62", default-features = false, features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_Pipes", "Win32_System_Threading"] }
+windows = { version = "0.62", default-features = false, features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_Pipes", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
 
 # Non-blocking runtime pipes and process-group termination for the chat supervisor.
 [target.'cfg(unix)'.dependencies]

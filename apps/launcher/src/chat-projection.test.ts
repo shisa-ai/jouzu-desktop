@@ -129,3 +129,18 @@ describe("released runtime event projection", () => {
     expect(() => projectEvent(state, { type: "message_update", assistantMessageEvent: { type: "text_start", contentIndex: 1000000 } })).toThrow();
   });
 });
+
+describe("host history with tool results", () => {
+  it("shows a tool's result on its call, never as a block of its own", () => {
+    const projection = historyRowsProjection([
+      { kind: "user", id: "u", text: "list", blocks: [{ type: "text", text: "list" }] },
+      { kind: "assistant", id: "a", text: "done", blocks: [
+        { type: "toolCall", toolCallId: "call-1", name: "ls", input: {} },
+        { type: "toolResult", toolCallId: "call-1", ok: true, result: { content: [{ type: "text", text: "a.txt" }] } },
+        { type: "text", text: "done" },
+      ] },
+    ]);
+    expect(projection.messages[1].content.map(block => block.type)).toEqual(["toolCall", "text"]);
+    expect(projection.tools["call-1"]).toMatchObject({ name: "ls", phase: "complete", result: { content: [{ type: "text", text: "a.txt" }] } });
+  });
+});

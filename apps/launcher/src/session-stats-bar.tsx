@@ -19,7 +19,7 @@ function formatDuration(ms: number) {
   return `${Math.floor(whole / 60)}m ${whole % 60}s`;
 }
 /** Whole-session counters and their DSH-style detail cards; no wall-clock session timer. */
-export function SessionStatsBar({ stats, timing }: { stats?: SessionStats; timing?: SessionTiming }) {
+export function SessionStatsBar({ stats, timing, firstOutputMs }: { stats?: SessionStats; timing?: SessionTiming; firstOutputMs?: number | null }) {
   if (!stats) return null;
   const tokens = stats.tokens ?? {};
   const total = Number.isFinite(tokens.total) ? tokens.total! : (tokens.input ?? 0) + (tokens.output ?? 0) + (tokens.cacheRead ?? 0) + (tokens.cacheWrite ?? 0);
@@ -35,7 +35,7 @@ export function SessionStatsBar({ stats, timing }: { stats?: SessionStats; timin
       <StatCard title="Session stats">
         <StatRow label="Model time" value={formatDuration(timing?.modelMs ?? 0)} />
         <StatRow label="Tool time" value={formatDuration(timing?.toolMs ?? 0)} />
-        <StatRow label="First token avg (TTFT)" value="—" />
+        <StatRow label="First token avg (TTFT)" value={firstOutputMs != null ? formatDuration(firstOutputMs) : "—"} />
         <StatRow label="Output speed (TPS)" value={speed !== null ? `${compact(speed)} tok/s` : "—"} />
       </StatCard>
     </StatPopover>}

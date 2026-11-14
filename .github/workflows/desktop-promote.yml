@@ -1,0 +1,101 @@
+name: Desktop promote to stable
+
+# The only path that writes the stable feed. It never builds: it points
+# `desktop-update/latest.json` at the installer and signature already published as
+# the QA prerelease `v<version>`, so stable users get the exact bytes QA installed.
+#
+# release-guard.mjs refuses unless `v<version>` is a QA prerelease that the QA feed
+# has offered, and unless the version is newer than what stable serves now.
+# `qa_result` is recorded in the release notes: what was checked on QA and by whom.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: QA version to promote (the prerelease v<version>)
+        required: true
+        type: string
+      qa_result:
+        description: What passed on QA (checklist, environment, who checked)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-release
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    environment: desktop-release
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '24.22.2'
+      - name: Check the QA release and both feeds
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_QA: ${{ inputs.qa_result }}
+        run: |
+          if [ -z "$(printf '%s' "$INPUT_QA" | tr -d '[:space:]')" ]; then
+            echo "::error::Describe what passed on QA before promoting"; exit 1
+          fi
+          release=-
+          if gh release view "v$INPUT_VERSION" --repo "$GITHUB_REPOSITORY" --json isPrerelease,body > release.json 2>/dev/null; then
+            release=release.json
+          fi
+          node packaging/launcher/release-guard.mjs promote "$INPUT_VERSION" "$GITHUB_REPOSITORY" "$release"
+      - name: Fetch the QA installer and its signature
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          asset="JouzuDesktop_${INPUT_VERSION}_x64-setup.exe"
+          gh release download "v$INPUT_VERSION" --repo "$GITHUB_REPOSITORY" --dir release \
+            --pattern "$asset" --pattern "$asset.sig" --pattern SHA256SUMS.txt
+          (cd release && sha256sum -c SHA256SUMS.txt)
+          public_key="$(node -p "require('./apps/launcher/src-tauri/tauri.conf.json').plugins.updater.pubkey")"
+          node packaging/launcher/verify-updater-signature.mjs "release/$asset" "release/$asset.sig" "$public_key"
+      - name: Write the stable feed for the same asset
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_QA: ${{ inputs.qa_result }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          asset="JouzuDesktop_${INPUT_VERSION}_x64-setup.exe"
+          node -e "process.stdout.write(require('./release.json').body || '')" > notes.md
+          printf '\n\nQA: %s\n' "$INPUT_QA" >> notes.md
+          node packaging/launcher/desktop-feed.mjs "$INPUT_VERSION" notes.md "$GITHUB_REPOSITORY" "$asset" "release/$asset.sig" latest.json
+          cat latest.json
+      - name: Mark the release stable and replace the stable feed
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          gh release edit "v$INPUT_VERSION" --repo "$GITHUB_REPOSITORY" --prerelease=false --latest \
+            --title "Jouzu Desktop $INPUT_VERSION" --notes-file notes.md
+          if ! gh release view desktop-update --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release create desktop-update --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease \
+              --title "Jouzu Desktop update feed" --notes "Signed desktop update feed. Do not delete."
+          fi
+          gh release upload desktop-update latest.json --repo "$GITHUB_REPOSITORY" --clobber
+      - name: Verify the stable feed is anonymously readable
+        run: |
+          endpoint="https://github.com/${GITHUB_REPOSITORY}/releases/download/desktop-update/latest.json"
+          for attempt in 1 2 3 4 5; do
+            if curl -fsSL "$endpoint" -o published.json; then break; fi
+            sleep 3
+          done
+          cmp latest.json published.json
+          asset="$(node -p "require('./published.json').platforms['windows-x86_64'].url")"
+          curl -fsSL -o /dev/null "$asset"

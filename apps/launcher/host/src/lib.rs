@@ -44,6 +44,9 @@ use tokio::{io::AsyncReadExt, sync::broadcast};
 
 pub const COOKIE_NAME: &str = "jouzu_host";
 pub const HOST_SCHEMA: u32 = 1;
+/// Stamped by `scripts/build-app.mjs`; the shell checks it matches its own.
+pub const BUILD_ID: &str = env!("JOUZU_BUILD_ID");
+pub const COMMIT: &str = env!("JOUZU_COMMIT");
 
 #[derive(Clone)]
 pub struct AppState {
@@ -63,6 +66,7 @@ pub struct HostInfo {
     pub schema: u32,
     #[serde(rename = "hostVersion")]
     pub host_version: String,
+    pub build: String,
     pub pid: u32,
     pub port: u16,
     pub token: String,
@@ -165,6 +169,7 @@ pub fn write_host_file(
     let info = HostInfo {
         schema: HOST_SCHEMA,
         host_version: version.to_string(),
+        build: BUILD_ID.to_string(),
         pid: std::process::id(),
         port,
         token: token.to_string(),
@@ -207,12 +212,17 @@ pub fn log(home: &Path, level: &str, event: &str, fields: Value) {
         "fields": fields,
     });
     use std::io::Write;
+    // One whole line per write, one writer at a time: lines from concurrent
+    // sessions must never interleave (Windows appends are not atomic).
+    static WRITER: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let line = format!("{record}\n");
+    let _guard = WRITER.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Ok(mut file) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(path.join("host.log"))
     {
-        let _ = writeln!(file, "{record}");
+        let _ = file.write_all(line.as_bytes());
     }
 }
 
@@ -227,6 +237,8 @@ pub fn router(state: AppState) -> Router {
     let api = Router::new()
         .route("/health", get(health))
         .route("/status", get(host_status))
+        .route("/timing", axum::routing::post(record_ui_timing))
+        .route("/runtime/warm", get(warm_runtime).post(aim_warm_runtime))
         .route(
             "/environment",
             get(read_environment).put(save_environment),
@@ -304,10 +316,11 @@ pub fn router(state: AppState) -> Router {
             axum::routing::post(queue_session),
         )
         .route("/sessions/{id}/stop", axum::routing::post(stop_session))
-        .route(
-            "/sessions/{id}/command",
-            axum::routing::post(session_command),
-        )
+        .route("/sessions/{id}/view", axum::routing::post(view_session))
+        .route("/sessions/{id}/stats", get(session_stats))
+        .route("/sessions/{id}/compact", axum::routing::post(compact_session))
+        .route("/sessions/{id}/export", axum::routing::post(export_session))
+        .route("/sessions/{id}/reload", axum::routing::post(reload_session))
         .route("/sessions/{id}/events", get(session_events))
         .route(
             "/approvals/{id}/decision",
@@ -320,6 +333,10 @@ pub fn router(state: AppState) -> Router {
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             require_auth,
+        ))
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            log_failures,
         ));
 
     Router::new()
@@ -594,6 +611,7 @@ async fn create_session(
     State(state): State<AppState>,
     Json(request): Json<CreateRequest>,
 ) -> Result<Response, ApiError> {
+    let client_id = request.client_id.clone();
     let session = if request.session_path.is_none() {
         state.sessions.create_pending(
             &request.workspace_path,
@@ -605,12 +623,21 @@ async fn create_session(
             .sessions
             .create(&request.workspace_path, request.session_path, request.key)?
     };
+    session.adopt_default_model(state.models.default_model());
+    if let Some(client_id) = client_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        state.sessions.hold(client_id, &session.id);
+    }
     let mut response = (
         StatusCode::ACCEPTED,
         Json(json!({
             "sessionId": session.id,
             "status": session.status().as_str(),
             "cursor": session.cursor(),
+            "sessionPath": session.saved_path(),
+            "workspacePath": session.workspace_path,
         })),
     )
         .into_response();
@@ -620,6 +647,23 @@ async fn create_session(
             .unwrap_or_else(|_| HeaderValue::from_static("/v1/sessions")),
     );
     Ok(response)
+}
+
+#[derive(Deserialize)]
+struct ViewRequest {
+    #[serde(rename = "clientId")]
+    client_id: String,
+}
+
+/// The client now shows this session: its content streams to that client again.
+async fn view_session(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    Json(request): Json<ViewRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let session = state.sessions.get(&id).ok_or_else(session_not_found)?;
+    state.sessions.hold(request.client_id.trim(), &session.id);
+    Ok(Json(json!({ "sessionId": session.id, "cursor": session.cursor() })))
 }
 
 async fn get_session(
@@ -636,6 +680,13 @@ async fn send_message(
     Json(request): Json<SendRequest>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     let session = state.sessions.get(&id).ok_or_else(session_not_found)?;
+    if let Some(client_id) = request
+        .client_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        state.sessions.hold(client_id, &session.id);
+    }
     let value = session.send_with_client(
         &request.client_message_id,
         &request.text,
@@ -657,6 +708,14 @@ async fn select_session_model(
     Json(request): Json<SessionModelRequest>,
 ) -> Result<Json<Value>, ApiError> {
     let session = state.sessions.get(&id).ok_or_else(session_not_found)?;
+    // Refuse what the runtime cannot use now, instead of accepting it and
+    // running the session on another model.
+    state
+        .models
+        .check_usable(&request.provider, &request.model)
+        .map_err(|reason| {
+            ApiError::new(StatusCode::BAD_REQUEST, "model-unavailable", reason, false)
+        })?;
     let model = session
         .select_model(&request.provider, &request.model)
         .await?;
@@ -678,14 +737,72 @@ async fn select_session_thinking(
     Ok(Json(json!({ "level": request.level })))
 }
 
-async fn session_command(
+/// Usage counters for the status line. A session without a runtime yet has no
+/// counters, which is an answer (`null`), not an error.
+async fn session_stats(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
-    Json(command): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    let session = state.sessions.get(&id).ok_or_else(session_not_found)?;
+    if !session.has_runtime() {
+        return Ok(Json(json!({ "stats": null })));
+    }
+    let stats = session
+        .request(json!({ "type": "get_session_stats" }), Duration::from_secs(10))
+        .await?;
+    Ok(Json(json!({ "stats": stats })))
+}
+
+async fn compact_session(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
 ) -> Result<Json<Value>, ApiError> {
     let session = state.sessions.get(&id).ok_or_else(session_not_found)?;
     let data = session
-        .request(command, Duration::from_secs(30))
+        .request(json!({ "type": "compact" }), Duration::from_secs(300))
+        .await?;
+    Ok(Json(json!({ "data": data })))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ExportRequest {
+    output_path: String,
+}
+
+async fn export_session(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    Json(request): Json<ExportRequest>,
+) -> Result<Json<Value>, ApiError> {
+    if request.output_path.trim().is_empty() {
+        return Err(ApiError::bad_request("outputPath is required"));
+    }
+    let session = state.sessions.get(&id).ok_or_else(session_not_found)?;
+    let data = session
+        .request(
+            json!({ "type": "export_html", "outputPath": request.output_path }),
+            Duration::from_secs(60),
+        )
+        .await?;
+    Ok(Json(json!({ "data": data })))
+}
+
+/// Re-read the session's own saved file into its runtime. The host knows which
+/// file that is, so the client does not name a path.
+async fn reload_session(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<Value>, ApiError> {
+    let session = state.sessions.get(&id).ok_or_else(session_not_found)?;
+    let path = session
+        .saved_path()
+        .ok_or_else(|| ApiError::bad_request("This session has no saved file yet"))?;
+    let data = session
+        .request(
+            json!({ "type": "switch_session", "sessionPath": path }),
+            Duration::from_secs(30),
+        )
         .await?;
     Ok(Json(json!({ "data": data })))
 }
@@ -895,7 +1012,23 @@ async fn control_request(
     State(state): State<AppState>,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
-    state.control.request(body).await.map(Json)
+    let reads_only = matches!(
+        body.get("action").and_then(Value::as_str),
+        Some("status" | "available-models")
+    );
+    let result = state.control.request(body).await;
+    // Sign-ins, providers, profiles and catalogs change what a runtime loads at
+    // start; an unused warm runtime would still have the old ones.
+    if !reads_only && result.is_ok() {
+        recycle_warm_runtime(&state);
+    }
+    result.map(Json)
+}
+
+fn recycle_warm_runtime(state: &AppState) {
+    if let Some(pool) = state.sessions.warm_runtime() {
+        pool.recycle();
+    }
 }
 
 #[derive(Deserialize)]
@@ -977,12 +1110,45 @@ async fn global_events(
         .and_then(|value| value.parse::<u64>().ok())
         .or(query.after)
         .unwrap_or(0);
+    // The global stream is the production path for every client: register the
+    // client's capabilities here too, or prompt answers are refused (403).
+    if let Some(client_id) = query
+        .client_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let capabilities: Vec<String> = query
+            .capabilities
+            .as_deref()
+            .unwrap_or_default()
+            .split(',')
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string)
+            .collect();
+        state.sessions.register_client(client_id, &capabilities);
+    }
+    // While this stream is open, the session the client has open is not reaped.
+    let client_stream = query
+        .client_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|client_id| state.sessions.connect_client(client_id));
+    let viewer = query
+        .client_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string);
     let latest = state.events.latest_seq();
     let summaries = state.sessions.summaries();
     let sessions = state.sessions.clone();
     let mut receiver = state.events.subscribe();
     let events = state.events.clone();
     let stream = async_stream::stream! {
+        let _client_stream = client_stream;
         let mut last = after;
         if after == 0 {
             // A fresh client gets current summaries, not the entire history ring.
@@ -1011,6 +1177,7 @@ async fn global_events(
             } else {
                 for event in replay {
                     last = event.seq;
+                    if withheld(&sessions, viewer.as_deref(), &event) { continue; }
                     yield Ok::<_, Infallible>(hub_sse_event(event));
                 }
             }
@@ -1019,6 +1186,7 @@ async fn global_events(
             match receiver.recv().await {
                 Ok(event) if event.seq > last => {
                     last = event.seq;
+                    if withheld(&sessions, viewer.as_deref(), &event) { continue; }
                     yield Ok::<_, Infallible>(hub_sse_event(event));
                 }
                 Ok(_) => {}
@@ -1038,6 +1206,29 @@ async fn global_events(
     Sse::new(stream)
         .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
         .into_response()
+}
+
+/// What a session says, as opposed to what state it is in. Content goes only to a
+/// client viewing that session; state (status, turns, the summary) goes to every
+/// client, so a sidebar always knows which sessions are running. A client that
+/// opens a session catches up from its history, which includes the partial reply.
+const CONTENT_EVENTS: &[&str] = &[
+    "message.start",
+    "message.delta",
+    "message.done",
+    "message.custom",
+    "tool.start",
+    "tool.update",
+    "tool.result",
+    "runtime.event",
+];
+
+fn withheld(sessions: &SessionManager, viewer: Option<&str>, event: &events::HubEvent) -> bool {
+    let Some(viewer) = viewer else { return false };
+    if event.session_id.is_empty() || !CONTENT_EVENTS.contains(&event.event.as_str()) {
+        return false;
+    }
+    sessions.viewing(viewer).as_deref() != Some(event.session_id.as_str())
 }
 
 fn hub_sse_event(event: events::HubEvent) -> SseEvent {
@@ -1086,6 +1277,40 @@ async fn root(State(state): State<AppState>, uri: Uri) -> Response {
     }
 }
 
+/// Moments only the client can see: the loading page giving way, the user's own
+/// message on screen, the first words painted, Stop shown. They land in host.log
+/// beside the host's own `timing` lines, so one log times what the user saw.
+#[derive(Deserialize)]
+struct UiTiming {
+    mark: String,
+    #[serde(rename = "sessionId")]
+    session_id: Option<String>,
+    #[serde(rename = "clientMessageId")]
+    client_message_id: Option<String>,
+}
+
+const UI_TIMING_MARKS: &[&str] = &["ui.boot", "loading.ready", "message.shown", "first_output.shown", "stop.shown"];
+
+async fn record_ui_timing(
+    State(state): State<AppState>,
+    Json(body): Json<UiTiming>,
+) -> Result<Json<Value>, ApiError> {
+    if !UI_TIMING_MARKS.contains(&body.mark.as_str()) {
+        return Err(ApiError::bad_request("Unknown timing mark"));
+    }
+    log(
+        state.sessions.home(),
+        "info",
+        "timing.ui",
+        json!({
+            "mark": body.mark,
+            "session": body.session_id,
+            "clientMessageId": body.client_message_id,
+        }),
+    );
+    Ok(Json(json!({ "recorded": true })))
+}
+
 async fn health(State(state): State<AppState>) -> Response {
     Json(json!({
         "status": "ok",
@@ -1093,6 +1318,58 @@ async fn health(State(state): State<AppState>) -> Response {
         "uptimeSeconds": state.started.elapsed().as_secs(),
     }))
     .into_response()
+}
+
+#[derive(Deserialize)]
+struct WarmQuery {
+    #[serde(rename = "waitMs")]
+    wait_ms: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct AimWarmRequest {
+    #[serde(rename = "workspacePath")]
+    workspace_path: String,
+}
+
+/// The client opened a workspace: warm the runtime for it.
+async fn aim_warm_runtime(
+    State(state): State<AppState>,
+    Json(request): Json<AimWarmRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let Some(pool) = state.sessions.warm_runtime() else {
+        return Ok(Json(json!({ "state": "off" })));
+    };
+    let workspace = std::fs::canonicalize(&request.workspace_path)
+        .map_err(|_| ApiError::bad_request("workspacePath is unavailable"))?;
+    if !workspace.is_dir() || !state.sessions.workspace_allowed(&request.workspace_path) {
+        return Err(ApiError::bad_request("workspacePath must be a known folder"));
+    }
+    // In the spelling this folder's sessions already use.
+    let text = state.sessions.folder_text(&workspace);
+    // A client asking (loading, or its retry) is a fresh reason to try again.
+    pool.reset_failures();
+    pool.aim(std::path::Path::new(&text));
+    // The window shows loading until this runtime is ready.
+    pool.hurry();
+    Ok(Json(pool.status()))
+}
+
+/// The warm runtime's state. With `waitMs`, waits until it is ready or failed
+/// (at most that long), so the loading screen can wait without polling.
+async fn warm_runtime(
+    State(state): State<AppState>,
+    Query(query): Query<WarmQuery>,
+) -> Json<Value> {
+    let Some(pool) = state.sessions.warm_runtime() else {
+        return Json(json!({ "state": "off" }));
+    };
+    let wait = Duration::from_millis(query.wait_ms.unwrap_or(0).min(120_000));
+    if wait.is_zero() {
+        return Json(pool.status());
+    }
+    pool.hurry();
+    Json(pool.wait_settled(wait).await)
 }
 
 async fn host_status(State(state): State<AppState>) -> Json<Value> {
@@ -1111,9 +1388,9 @@ async fn save_environment(
     State(state): State<AppState>,
     Json(entries): Json<Vec<environment::Entry>>,
 ) -> Result<Json<Value>, ApiError> {
-    environment::save(state.sessions.runtime_home(), &entries)
-        .map(|()| Json(json!({ "entries": entries })))
-        .map_err(ApiError::bad_request)
+    environment::save(state.sessions.runtime_home(), &entries).map_err(ApiError::bad_request)?;
+    recycle_warm_runtime(&state);
+    Ok(Json(json!({ "entries": entries })))
 }
 
 async fn models(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
@@ -1202,6 +1479,7 @@ async fn update_tools(
     }
     std::fs::write(&path, format!("{}\n", value))
         .map_err(|error| ApiError::internal(format!("Could not save tools: {error}")))?;
+    recycle_warm_runtime(&state);
     Ok(Json(value))
 }
 
@@ -1361,6 +1639,31 @@ async fn history(
 ) -> Result<Json<Value>, ApiError> {
     let session = state.sessions.get(&id).ok_or_else(session_not_found)?;
     Ok(Json(session.history(query.limit.unwrap_or(200), query.before)))
+}
+
+/// A request the host could not serve leaves a line in host.log with what the
+/// client was told, so no failure exists only in a UI that may not show it.
+async fn log_failures(State(state): State<AppState>, request: Request, next: Next) -> Response {
+    let method = request.method().to_string();
+    let path = request.uri().path().to_string();
+    let response = next.run(request).await;
+    if !response.status().is_server_error() {
+        return response;
+    }
+    let status = response.status();
+    let (parts, body) = response.into_parts();
+    let bytes = axum::body::to_bytes(body, 64 * 1024).await.unwrap_or_default();
+    let error = serde_json::from_slice::<Value>(&bytes)
+        .ok()
+        .and_then(|value| value.get("error").cloned())
+        .unwrap_or(Value::Null);
+    log(
+        &state.sessions.home(),
+        "error",
+        "request.failed",
+        json!({ "method": method, "path": path, "status": status.as_u16(), "error": error }),
+    );
+    Response::from_parts(parts, axum::body::Body::from(bytes))
 }
 
 async fn require_auth(State(state): State<AppState>, request: Request, next: Next) -> Response {
@@ -1841,6 +2144,7 @@ mod tests {
         let value: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
         assert_eq!(value["schema"], 1);
         assert_eq!(value["hostVersion"], "0.1.0");
+        assert_eq!(value["build"], BUILD_ID);
         assert_eq!(value["port"], 40123);
         assert_eq!(value["token"], "a".repeat(64));
         assert!(value["startedAt"].as_str().unwrap().contains('T'));
@@ -2284,7 +2588,7 @@ mod session_tests {
             .unwrap();
         wait_status(&session, Status::Idle).await;
         session.send("first", "one").unwrap();
-        wait_status(&session, Status::Running).await;
+        wait_until(|| session.history(50, None)["messages"].as_array().is_some_and(|rows| rows.iter().any(|row| row["kind"] == "assistant"))).await;
         session.send("second", "two").unwrap();
         wait_until(|| {
             session.status() == Status::Idle
@@ -2328,7 +2632,214 @@ mod session_tests {
             .map(|row| format!("{}{}", row["kind"].as_str().unwrap_or(""), if row["partial"] == true { "*" } else { "" }))
             .collect();
         rows.reverse();
-        assert_eq!(rows, vec!["user", "assistant*", "user"], "{history}");
+        // A waiting message is in the queue, not yet in the conversation.
+        assert_eq!(rows, vec!["user", "assistant*"], "{history}");
+        let queue = session.summary()["queue"].clone();
+        assert_eq!(queue.as_array().map(Vec::len), Some(1), "{queue}");
+        assert_eq!(queue[0]["text"], "two");
+    }
+
+    fn conversation(session: &crate::session::Session) -> Vec<String> {
+        let mut rows: Vec<String> = session.history(200, None)["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| format!("{}:{}", row["kind"].as_str().unwrap_or(""), row["text"].as_str().unwrap_or("")))
+            .collect();
+        rows.reverse();
+        rows
+    }
+
+    fn queue_texts(session: &crate::session::Session) -> Vec<String> {
+        session.summary()["queue"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["text"].as_str().unwrap_or("").to_string())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_message_sent_during_a_run_steers_it_once_in_order() {
+        let prompts = tempfile::NamedTempFile::new().unwrap();
+        let prompt_log = prompts.path().to_str().unwrap().to_string();
+        let (manager, _home, workspace) = manager_with_env(
+            200,
+            &[
+                ("FAKE_RUNTIME_STEPS", "3"),
+                ("FAKE_RUNTIME_DELAY_MS", "60"),
+                ("FAKE_RUNTIME_PROMPT_LOG", &prompt_log),
+            ],
+        );
+        let session = manager
+            .create(workspace.path().to_str().unwrap(), None, None)
+            .unwrap();
+        wait_status(&session, Status::Idle).await;
+        session.send("first", "one").unwrap();
+        wait_until(|| session.history(50, None)["messages"].as_array().is_some_and(|rows| rows.iter().any(|row| row["kind"] == "assistant"))).await;
+        let receipt = session.send("second", "two").unwrap();
+        assert_eq!(receipt["waiting"], true, "{receipt}");
+        session.send("third", "three").unwrap();
+        assert_eq!(queue_texts(&session), vec!["two", "three"]);
+        // Sending the same message again (a reconnecting client) changes nothing.
+        session.send("second", "two").unwrap();
+        wait_until(|| session.status() == Status::Idle && queue_texts(&session).is_empty()).await;
+        let rows = conversation(&session);
+        let users: Vec<&String> = rows.iter().filter(|row| row.starts_with("user:")).collect();
+        assert_eq!(users, vec!["user:one", "user:two", "user:three"], "{rows:?}");
+        // Each steered message sits between replies of the same run, in order.
+        let two = rows.iter().position(|row| row == "user:two").unwrap();
+        let three = rows.iter().position(|row| row == "user:three").unwrap();
+        assert!(!rows[two - 1].starts_with("user:") && !rows[three - 1].starts_with("user:"), "{rows:?}");
+        assert!(rows.last().unwrap().starts_with("assistant:"), "{rows:?}");
+        // They went in as steer, not as new prompts.
+        let sent = std::fs::read_to_string(&prompt_log).unwrap();
+        assert_eq!(sent.lines().collect::<Vec<_>>(), vec!["one"], "{sent}");
+    }
+
+    #[tokio::test]
+    async fn stop_takes_steered_messages_back_and_continue_sends_them_once() {
+        let prompts = tempfile::NamedTempFile::new().unwrap();
+        let prompt_log = prompts.path().to_str().unwrap().to_string();
+        let (manager, _home, workspace) = manager_with_env(
+            200,
+            &[
+                ("FAKE_RUNTIME_STEPS", "2"),
+                ("FAKE_RUNTIME_HANG_TOOL", "1"),
+                ("FAKE_RUNTIME_PROMPT_LOG", &prompt_log),
+            ],
+        );
+        let session = manager
+            .create(workspace.path().to_str().unwrap(), None, None)
+            .unwrap();
+        wait_status(&session, Status::Idle).await;
+        session.send("first", "one").unwrap();
+        wait_until(|| session.history(50, None)["messages"].as_array().is_some_and(|rows| rows.iter().any(|row| row["kind"] == "assistant"))).await;
+        session.send("second", "two").unwrap();
+        // The tool never finishes, so the run never reaches a step boundary.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        session.interrupt().unwrap();
+        wait_until(|| session.status() == Status::Idle).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let summary = session.summary();
+        assert_eq!(queue_texts(&session), vec!["two"], "{summary}");
+        assert_eq!(summary["queue"][0]["state"], "paused", "{summary}");
+        assert!(!conversation(&session).contains(&"user:two".to_string()));
+        session.continue_queue().unwrap();
+        // It runs as its own turn now (this fixture's runs wait on a tool).
+        wait_until(|| queue_texts(&session).is_empty() && std::fs::read_to_string(&prompt_log).is_ok_and(|text| text.lines().count() == 2)).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let rows = conversation(&session);
+        assert_eq!(rows.iter().filter(|row| *row == "user:two").count(), 1, "{rows:?}");
+        let sent = std::fs::read_to_string(&prompt_log).unwrap();
+        assert_eq!(sent.lines().collect::<Vec<_>>(), vec!["one", "two"], "{sent}");
+    }
+
+    #[tokio::test]
+    async fn a_removed_message_never_reaches_the_runtime() {
+        let prompts = tempfile::NamedTempFile::new().unwrap();
+        let prompt_log = prompts.path().to_str().unwrap().to_string();
+        let (manager, _home, workspace) = manager_with_env(
+            200,
+            &[
+                ("FAKE_RUNTIME_STEPS", "2"),
+                ("FAKE_RUNTIME_HANG_TOOL", "1"),
+                ("FAKE_RUNTIME_PROMPT_LOG", &prompt_log),
+            ],
+        );
+        let session = manager
+            .create(workspace.path().to_str().unwrap(), None, None)
+            .unwrap();
+        wait_status(&session, Status::Idle).await;
+        session.send("first", "one").unwrap();
+        wait_until(|| session.history(50, None)["messages"].as_array().is_some_and(|rows| rows.iter().any(|row| row["kind"] == "assistant"))).await;
+        session.send("second", "two").unwrap();
+        session.send("third", "three").unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(session.cancel_message("second").unwrap()["status"], "cancelled");
+        assert_eq!(queue_texts(&session), vec!["three"]);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        session.interrupt().unwrap();
+        wait_until(|| session.status() == Status::Idle).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        session.continue_queue().unwrap();
+        wait_until(|| queue_texts(&session).is_empty() && std::fs::read_to_string(&prompt_log).is_ok_and(|text| text.lines().count() == 2)).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let rows = conversation(&session);
+        assert!(!rows.contains(&"user:two".to_string()), "{rows:?}");
+        assert_eq!(rows.iter().filter(|row| *row == "user:three").count(), 1, "{rows:?}");
+        let sent = std::fs::read_to_string(&prompt_log).unwrap();
+        assert_eq!(sent.lines().collect::<Vec<_>>(), vec!["one", "three"], "{sent}");
+    }
+
+    #[tokio::test]
+    async fn a_message_the_runtime_will_not_steer_runs_as_the_next_turn() {
+        let prompts = tempfile::NamedTempFile::new().unwrap();
+        let prompt_log = prompts.path().to_str().unwrap().to_string();
+        let (manager, _home, workspace) = manager_with_env(
+            200,
+            &[
+                ("FAKE_RUNTIME_STEPS", "2"),
+                ("FAKE_RUNTIME_DELAY_MS", "60"),
+                ("FAKE_RUNTIME_PROMPT_LOG", &prompt_log),
+            ],
+        );
+        let session = manager
+            .create(workspace.path().to_str().unwrap(), None, None)
+            .unwrap();
+        wait_status(&session, Status::Idle).await;
+        let mut rx = session.subscribe();
+        session.send("first", "one").unwrap();
+        wait_until(|| session.history(50, None)["messages"].as_array().is_some_and(|rows| rows.iter().any(|row| row["kind"] == "assistant"))).await;
+        session.send("second", "/ext run").unwrap();
+        wait_until(|| std::fs::read_to_string(&prompt_log).is_ok_and(|text| text.lines().count() == 2)).await;
+        wait_until(|| session.status() == Status::Idle && queue_texts(&session).is_empty()).await;
+        let sent = std::fs::read_to_string(&prompt_log).unwrap();
+        assert_eq!(sent.lines().collect::<Vec<_>>(), vec!["one", "/ext run"], "{sent}");
+        // The refusal is the host's to handle; nobody sees a runtime error for it.
+        while let Ok(event) = rx.try_recv() {
+            assert_ne!(event.event, "error", "{:?}", event.data);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_steered_message_keeps_its_images() {
+        let (manager, _home, workspace) =
+            manager_with_env(200, &[("FAKE_RUNTIME_STEPS", "3"), ("FAKE_RUNTIME_DELAY_MS", "60")]);
+        let session = manager
+            .create(workspace.path().to_str().unwrap(), None, None)
+            .unwrap();
+        wait_status(&session, Status::Idle).await;
+        session.send("first", "one").unwrap();
+        wait_until(|| session.history(50, None)["messages"].as_array().is_some_and(|rows| rows.iter().any(|row| row["kind"] == "assistant"))).await;
+        session
+            .send_with_client(
+                "second",
+                "look",
+                None,
+                &[Attachment { name: "pixel.png".into(), mime_type: "image/png".into(), data: "AAEC".into() }],
+            )
+            .unwrap();
+        assert_eq!(session.summary()["queue"][0]["images"], 1);
+        wait_until(|| session.status() == Status::Idle && queue_texts(&session).is_empty()).await;
+        let history = session.history(50, None);
+        let user = history["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["kind"] == "user" && row["text"] == "look")
+            .cloned()
+            .unwrap();
+        assert_eq!(user["attachments"][0]["mimeType"], "image/png", "{user}");
+        let messages = session.request(json!({ "type": "get_messages" }), Duration::from_secs(2)).await.unwrap();
+        let delivered = messages.get("data").unwrap_or(&messages)["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|message| message["role"] == "user" && message["content"][0]["text"] == "look")
+            .cloned()
+            .unwrap();
+        assert_eq!(delivered["content"][1]["mimeType"], "image/png", "{delivered}");
     }
 
     #[tokio::test]
@@ -2527,7 +3038,7 @@ mod session_tests {
         let first = directory.join("first.jsonl");
         std::fs::write(
             &first,
-            format!("{{\"type\":\"session\",\"cwd\":\"{cwd}\"}}\n"),
+            format!("{{\"type\":\"session\",\"cwd\":\"{cwd}\"}}\n{{\"type\":\"message\",\"message\":{{\"role\":\"user\",\"content\":\"hi\"}}}}\n"),
         )
         .unwrap();
         let app = app(manager);
@@ -2543,7 +3054,7 @@ mod session_tests {
         let second = directory.join("second.jsonl");
         std::fs::write(
             &second,
-            format!("{{\"type\":\"session\",\"cwd\":\"{cwd}\"}}\n"),
+            format!("{{\"type\":\"session\",\"cwd\":\"{cwd}\"}}\n{{\"type\":\"message\",\"message\":{{\"role\":\"user\",\"content\":\"hi\"}}}}\n"),
         )
         .unwrap();
         let cached = call(
@@ -2655,21 +3166,222 @@ mod session_tests {
         wait_status(&session, Status::Idle).await;
         let history = session.history(50, None);
         let rows = history["messages"].as_array().unwrap();
-        let assistant = rows
+        // Each step of the run is its own reply; together they hold everything.
+        let replies = rows
             .iter()
-            .find(|row| row["kind"] == "assistant")
-            .expect("assistant row");
-        let types = assistant["blocks"]
+            .filter(|row| row["kind"] == "assistant")
+            .collect::<Vec<_>>();
+        assert_eq!(replies.len(), 2, "{history}");
+        let types = replies
+            .iter()
+            .flat_map(|row| row["blocks"].as_array().unwrap().iter())
+            .filter_map(|block| block["type"].as_str())
+            .collect::<Vec<_>>();
+        assert!(types.contains(&"thinking"), "{history}");
+        assert!(types.contains(&"toolCall"), "{history}");
+        assert!(types.contains(&"toolResult"), "{history}");
+        let tool = rows.iter().find(|row| row["kind"] == "tool").unwrap();
+        assert_eq!(tool["tool"]["status"], "ok", "{tool}");
+    }
+
+    /// Polls the session summary while a run goes on and records each step state
+    /// it shows, in order, until the session is idle again.
+    async fn step_states(session: &crate::session::Session) -> Vec<Value> {
+        let mut seen: Vec<Value> = Vec::new();
+        for _ in 0..2000 {
+            let step = session.summary()["activeTurn"]["step"].clone();
+            if !step.is_null() && seen.last() != Some(&step) {
+                seen.push(step);
+            }
+            if session.status() == Status::Idle && !seen.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        seen
+    }
+
+    #[tokio::test]
+    async fn a_run_of_several_steps_keeps_each_step_as_its_own_reply() {
+        let (manager, home, workspace) =
+            manager_with_env(50, &[("FAKE_RUNTIME_STEPS", "3"), ("FAKE_RUNTIME_DELAY_MS", "25")]);
+        let session = manager
+            .create(workspace.path().to_str().unwrap(), None, None)
+            .unwrap();
+        wait_status(&session, Status::Idle).await;
+        let app = app(manager.clone());
+        let (mut rx, reader) = subscribe(app, &session.id).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        session.send("steps-1", "go").unwrap();
+        let states = step_states(&session).await;
+        let mut starts = Vec::new();
+        let mut done = Vec::new();
+        loop {
+            let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            match event.0.as_str() {
+                "message.start" => starts.push(event.1["step"].clone()),
+                "message.done" => done.push((event.1["step"].clone(), event.1["stopReason"].clone())),
+                "turn.end" => break,
+                _ => {}
+            }
+        }
+        reader.abort();
+        // The client hears each step begin and end.
+        assert_eq!(starts, vec![json!(1), json!(2), json!(3)]);
+        assert_eq!(
+            done,
+            vec![(json!(1), json!("toolUse")), (json!(2), json!("toolUse")), (json!(3), json!("stop"))]
+        );
+        // The summary says which step runs and what it is doing.
+        let names = states.iter().map(|step| step["state"].as_str().unwrap_or("")).collect::<Vec<_>>();
+        for state in ["waiting_model", "thinking", "writing", "tools"] {
+            assert!(names.contains(&state), "{state} missing from {states:?}");
+        }
+        assert!(states.iter().any(|step| step["n"] == 3), "{states:?}");
+        assert!(
+            states.iter().any(|step| step["tools"].as_array().is_some_and(|tools| tools.iter().any(|tool| tool["name"] == "bash"))),
+            "{states:?}"
+        );
+        // History: one reply per step, in order, reasoning kept, results on their calls.
+        let history = session.history(50, None);
+        let mut replies = history["messages"]
             .as_array()
             .unwrap()
             .iter()
-            .filter_map(|block| block["type"].as_str())
+            .filter(|row| row["kind"] == "assistant")
+            .cloned()
             .collect::<Vec<_>>();
-        assert!(types.contains(&"thinking"), "{assistant}");
-        assert!(types.contains(&"toolCall"), "{assistant}");
-        assert!(types.contains(&"toolResult"), "{assistant}");
-        let tool = rows.iter().find(|row| row["kind"] == "tool").unwrap();
-        assert_eq!(tool["tool"]["status"], "ok", "{tool}");
+        replies.reverse();
+        assert_eq!(replies.len(), 3, "{history}");
+        for (index, reply) in replies.iter().enumerate() {
+            let n = index + 1;
+            assert_eq!(reply["step"], json!(n), "{reply}");
+            let blocks = reply["blocks"].as_array().unwrap();
+            assert!(blocks.iter().any(|block| block["type"] == "thinking" && block["text"] == format!("think {n}")), "{reply}");
+            if n < 3 {
+                let call = format!("call-{n}");
+                assert!(blocks.iter().any(|block| block["type"] == "toolCall" && block["toolCallId"] == call), "{reply}");
+                assert!(blocks.iter().any(|block| block["type"] == "toolResult" && block["toolCallId"] == call && block["ok"] == true), "{reply}");
+            }
+            assert_eq!(reply["usage"]["output"], json!(n), "{reply}");
+        }
+        // Each step's wait for the model is timed.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let log = std::fs::read_to_string(home.path().join("logs").join("host.log")).unwrap_or_default();
+        assert_eq!(log.matches("\"step.start\"").count(), 3, "{log}");
+        assert_eq!(log.matches("\"step.first_output\"").count(), 3, "{log}");
+        assert_eq!(log.matches("\"tool.end\"").count(), 2, "{log}");
+    }
+
+    #[tokio::test]
+    async fn a_provider_retry_shows_while_it_waits() {
+        let (manager, _home, workspace) = manager_with_env(
+            50,
+            &[("FAKE_RUNTIME_STEPS", "2"), ("FAKE_RUNTIME_STEP_RETRY", "1"), ("FAKE_RUNTIME_DELAY_MS", "60")],
+        );
+        let session = manager
+            .create(workspace.path().to_str().unwrap(), None, None)
+            .unwrap();
+        wait_status(&session, Status::Idle).await;
+        session.send("retry-1", "go").unwrap();
+        let states = step_states(&session).await;
+        let retry = states
+            .iter()
+            .find(|step| step["state"] == "retrying")
+            .unwrap_or_else(|| panic!("no retry in {states:?}"));
+        assert_eq!(retry["retry"]["attempt"], 1);
+        assert_eq!(retry["retry"]["maxAttempts"], 3);
+        assert_eq!(retry["retry"]["error"], "overloaded");
+        let after = states.iter().skip_while(|step| step["state"] != "retrying").nth(1).unwrap();
+        assert_eq!(after["state"], "waiting_model", "{states:?}");
+        assert!(after["retry"].is_null(), "{states:?}");
+    }
+
+    #[tokio::test]
+    async fn a_tool_cut_off_by_stop_reads_as_interrupted() {
+        let (manager, _home, workspace) = manager_with_env(
+            50,
+            &[("FAKE_RUNTIME_STEPS", "3"), ("FAKE_RUNTIME_HANG_TOOL", "1"), ("FAKE_RUNTIME_DELAY_MS", "15")],
+        );
+        let session = manager
+            .create(workspace.path().to_str().unwrap(), None, None)
+            .unwrap();
+        wait_status(&session, Status::Idle).await;
+        let app = app(manager.clone());
+        let (mut rx, reader) = subscribe(app, &session.id).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        session.send("hang-1", "go").unwrap();
+        for _ in 0..300 {
+            let step = session.summary()["activeTurn"]["step"].clone();
+            if step["state"] == "tools" && step["tools"][0]["id"] == "call-2" {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(session.summary()["activeTurn"]["step"]["tools"][0]["id"], "call-2");
+        session.interrupt().unwrap();
+        let closed = loop {
+            let event = next_event(&mut rx, "tool.result").await;
+            if event["toolCallId"] == "call-2" {
+                break event;
+            }
+        };
+        assert_eq!(closed["interrupted"], true);
+        wait_status(&session, Status::Idle).await;
+        reader.abort();
+        let history = session.history(50, None);
+        let rows = history["messages"].as_array().unwrap();
+        let tool = rows.iter().find(|row| row["id"] == "tool:call-2").unwrap();
+        assert_eq!(tool["tool"]["status"], "interrupted", "{tool}");
+        let reply = rows
+            .iter()
+            .find(|row| row["kind"] == "assistant" && row["step"] == 2)
+            .unwrap();
+        assert!(
+            reply["blocks"].as_array().unwrap().iter().any(|block| block["type"] == "toolResult" && block["toolCallId"] == "call-2" && block["interrupted"] == true),
+            "{reply}"
+        );
+        // Nothing is left looking busy.
+        assert!(!rows.iter().any(|row| row["tool"]["status"] == "running"), "{history}");
+    }
+
+    #[tokio::test]
+    async fn an_extension_failure_is_reported_but_a_stale_context_race_is_not() {
+        let (manager, _home, workspace) = manager(50);
+        let session = manager
+            .create(workspace.path().to_str().unwrap(), None, None)
+            .unwrap();
+        wait_status(&session, Status::Idle).await;
+        let app = app(manager.clone());
+        let (mut rx, reader) = subscribe(app, &session.id).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let mut errors = Vec::new();
+        for (id, text) in [
+            ("stale-1", "EXTERR extension ctx is stale after session replacement"),
+            ("boom-1", "EXTERR flow guard crashed"),
+        ] {
+            wait_status(&session, Status::Idle).await;
+            session.send(id, text).unwrap();
+            loop {
+                let (name, data) = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                    .await
+                    .expect("timed out")
+                    .expect("stream closed");
+                if name == "error" {
+                    errors.push(data);
+                } else if name == "turn.end" {
+                    break;
+                }
+            }
+        }
+        reader.abort();
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(errors[0]["message"], "flow guard crashed");
+        assert_eq!(errors[0]["code"], "extension-error");
     }
 
     #[tokio::test]
@@ -2703,6 +3415,455 @@ mod session_tests {
         .await;
         assert_eq!(thinking.0, StatusCode::OK, "{}", thinking.2);
         assert!(thinking.2.contains("\"high\""), "{}", thinking.2);
+    }
+
+    #[tokio::test]
+    async fn the_summary_carries_the_selected_model() {
+        let (manager, _home, workspace) = manager(50);
+        let path = workspace.path().to_str().unwrap();
+        let pending = manager.create_pending(path, None, None).unwrap();
+        pending.select_model("fixture", "chosen").await.unwrap();
+        assert_eq!(pending.summary()["model"]["id"], "chosen");
+
+        let session = manager.create(path, None, None).unwrap();
+        wait_status(&session, Status::Idle).await;
+        session.select_model("fixture", "model").await.unwrap();
+        assert_eq!(session.summary()["model"]["id"], "model");
+        assert_eq!(session.summary()["model"]["provider"], "fixture");
+    }
+
+    #[tokio::test]
+    async fn the_summary_carries_the_reasoning_level() {
+        let (manager, _home, workspace) = manager(50);
+        let path = workspace.path().to_str().unwrap();
+        let pending = manager.create_pending(path, None, None).unwrap();
+        pending.select_thinking("low").await.unwrap();
+        assert_eq!(pending.summary()["thinkingLevel"], "low");
+
+        let session = manager.create(path, None, None).unwrap();
+        wait_status(&session, Status::Idle).await;
+        session.select_thinking("high").await.unwrap();
+        assert_eq!(session.summary()["thinkingLevel"], "high");
+    }
+
+    #[tokio::test]
+    async fn a_rejected_model_switch_leaves_the_session_usable() {
+        let (manager, _home, workspace) = manager(50);
+        let session = manager
+            .create(workspace.path().to_str().unwrap(), None, None)
+            .unwrap();
+        wait_status(&session, Status::Idle).await;
+        assert!(session.select_model("fixture", "missing").await.is_err());
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(session.status(), Status::Idle);
+        session.send("after-switch", "hello").unwrap();
+        wait_status(&session, Status::Idle).await;
+        assert!(session.send("again", "hello").is_ok());
+    }
+
+    #[tokio::test]
+    async fn the_default_model_shown_on_a_new_session_is_the_one_the_runtime_uses() {
+        let (manager, _home, workspace) = manager(50);
+        let session = manager
+            .create_pending(workspace.path().to_str().unwrap(), None, None)
+            .unwrap();
+        session.adopt_default_model(Some(json!({ "provider": "fixture", "id": "default-x" })));
+        session.send("first", "hello").unwrap();
+        wait_status(&session, Status::Idle).await;
+        let state = session
+            .request(json!({ "type": "get_state" }), Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert_eq!(state["model"]["id"], "default-x", "{state}");
+    }
+
+    #[tokio::test]
+    async fn a_new_session_takes_the_warm_runtime_and_the_pool_starts_the_next() {
+        let (manager, _home, workspace) = manager(50);
+        let pool = manager.enable_warm_runtime().expect("warm pool");
+        let session = manager
+            .create_pending(workspace.path().to_str().unwrap(), None, None)
+            .unwrap();
+        let status = pool.wait_settled(Duration::from_secs(10)).await;
+        assert_eq!(status["state"], "ready", "{status}");
+        let warm_pid = status["pid"].as_u64().unwrap() as u32;
+        session.send("first", "hello").unwrap();
+        assert_eq!(session.runtime_pid(), Some(warm_pid));
+        wait_status(&session, Status::Idle).await;
+        let state = session
+            .request(json!({ "type": "get_state" }), Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert!(state.is_object(), "{state}");
+        let next = pool.wait_settled(Duration::from_secs(10)).await;
+        assert_eq!(next["state"], "ready", "{next}");
+        assert_ne!(next["pid"].as_u64().unwrap() as u32, warm_pid);
+        assert_eq!(next["taken"], 1);
+        manager.stop_all();
+    }
+
+    #[tokio::test]
+    async fn opening_an_old_session_takes_the_warm_runtime() {
+        let (manager, _home, workspace) = manager(50);
+        let pool = manager.enable_warm_runtime().expect("warm pool");
+        let status = pool.wait_settled(Duration::from_secs(10)).await;
+        let warm_pid = status["pid"].as_u64().unwrap() as u32;
+        let path = workspace.path().join("old.jsonl");
+        let session = manager
+            .create(
+                workspace.path().to_str().unwrap(),
+                Some(path.to_string_lossy().into_owned()),
+                None,
+            )
+            .unwrap();
+        wait_status(&session, Status::Idle).await;
+        assert_eq!(session.runtime_pid(), Some(warm_pid));
+        session.send("old", "hello").unwrap();
+        wait_status(&session, Status::Idle).await;
+        manager.stop_all();
+    }
+
+    #[tokio::test]
+    async fn a_session_takes_a_warm_runtime_that_is_still_starting() {
+        let (manager, _home, workspace) =
+            manager_with_env(50, &[("FAKE_RUNTIME_START_DELAY_MS", "500")]);
+        let pool = manager.enable_warm_runtime().expect("warm pool");
+        let session = manager
+            .create_pending(workspace.path().to_str().unwrap(), None, None)
+            .unwrap();
+        assert_eq!(pool.status()["state"], "starting");
+        let warm_pid = pool.status()["pid"].as_u64().unwrap() as u32;
+        session.send("first", "hello").unwrap();
+        assert_eq!(session.runtime_pid(), Some(warm_pid));
+        wait_status(&session, Status::Idle).await;
+        manager.stop_all();
+    }
+
+    #[tokio::test]
+    async fn a_warm_runtime_that_exits_is_reported_and_sessions_still_start() {
+        let (manager, _home, workspace) =
+            manager_with_env(50, &[("FAKE_RUNTIME_EXIT_ON_START_MS", "5"), ("FAKE_RUNTIME_START_DELAY_MS", "50")]);
+        let pool = manager.enable_warm_runtime().expect("warm pool");
+        let first = pool.wait_settled(Duration::from_secs(10)).await;
+        let dead = first["pid"].as_u64();
+        // The fixture answers, then exits: a warm runtime that dies unused is
+        // dropped, never handed to a session; after repeated deaths the pool
+        // reports the failure and stops trying.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_ne!(pool.status()["pid"].as_u64(), dead, "{}", pool.status());
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while pool.status()["state"] != "failed" && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let status = pool.status();
+        assert_eq!(status["state"], "failed", "{status}");
+        assert!(status["pid"].is_null(), "{status}");
+        assert!(status["error"].as_str().unwrap().contains("exited"), "{status}");
+        manager.stop_all();
+        let _ = workspace;
+    }
+
+    #[tokio::test]
+    async fn the_warm_runtime_state_is_served_and_can_be_waited_for() {
+        let (manager, _home, _workspace) =
+            manager_with_env(50, &[("FAKE_RUNTIME_START_DELAY_MS", "300")]);
+        manager.enable_warm_runtime();
+        let app = app(manager.clone());
+        let (status, _, body) = call(
+            app,
+            request(Method::GET, "/v1/runtime/warm?waitMs=10000")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let value: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(value["state"], "ready", "{value}");
+        assert!(value["readyMs"].as_u64().unwrap() >= 300, "{value}");
+        manager.stop_all();
+    }
+
+    #[tokio::test]
+    async fn a_new_session_aims_the_warm_runtime_at_its_folder() {
+        let (manager, _home, workspace) = manager(50);
+        let pool = manager.enable_warm_runtime().expect("warm pool");
+        let scratch = pool.wait_settled(Duration::from_secs(10)).await;
+        assert_eq!(scratch["state"], "ready", "{scratch}");
+        let session = manager
+            .create_pending(workspace.path().to_str().unwrap(), None, None)
+            .unwrap();
+        let aimed = pool.wait_settled(Duration::from_secs(10)).await;
+        assert_eq!(aimed["state"], "ready", "{aimed}");
+        assert_ne!(aimed["pid"], scratch["pid"]);
+        let folder = std::fs::canonicalize(workspace.path()).unwrap();
+        assert_eq!(aimed["workspace"], folder.to_string_lossy().as_ref());
+        session.send("first", "hello").unwrap();
+        assert_eq!(
+            session.runtime_pid(),
+            Some(aimed["pid"].as_u64().unwrap() as u32)
+        );
+        wait_status(&session, Status::Idle).await;
+        // The next warm runtime is for the same folder, and remembered.
+        let next = pool.wait_settled(Duration::from_secs(10)).await;
+        assert_eq!(next["workspace"], aimed["workspace"]);
+        manager.stop_all();
+    }
+
+    #[tokio::test]
+    async fn each_recent_folder_keeps_a_warm_runtime() {
+        let (manager, _home, workspace) = manager(50);
+        let pool = manager.enable_warm_runtime().expect("warm pool");
+        let a = std::fs::canonicalize(workspace.path()).unwrap().join("a");
+        let b = std::fs::canonicalize(workspace.path()).unwrap().join("b");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        pool.aim(&a);
+        pool.aim(&b);
+        let count = |folder: &Path| {
+            pool.status()["slots"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|slot| slot["ready"] == true && slot["workspace"] == folder.to_string_lossy().as_ref())
+                .count()
+        };
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while pool.status()["ready"] != 4 && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_eq!(pool.status()["ready"], 4, "{}", pool.status());
+        assert_eq!(count(&b), 3, "{}", pool.status());
+        assert_eq!(count(&a), 1, "{}", pool.status());
+        // A session in the older folder gets that folder's runtime.
+        let session = manager.create_pending(a.to_str().unwrap(), None, None).unwrap();
+        session.send("in-a", "hello").unwrap();
+        wait_status(&session, Status::Idle).await;
+        assert_eq!(pool.folders()[0], a, "opening a session makes its folder the most recent");
+        manager.stop_all();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_old_session_runs_in_the_folder_text_its_file_records() {
+        // Pi treats two spellings of one folder as two folders; the runtime must
+        // start in the spelling the session file records, and warm for it next.
+        let (manager, _home, workspace) = manager(50);
+        let pool = manager.enable_warm_runtime().expect("warm pool");
+        let alias = tempfile::tempdir().unwrap();
+        let spelled = alias.path().join("same-folder");
+        std::os::unix::fs::symlink(workspace.path(), &spelled).unwrap();
+        let file = workspace.path().join("old.jsonl");
+        std::fs::write(
+            &file,
+            format!(
+                "{}\n",
+                json!({ "type": "session", "version": 3, "id": "old", "timestamp": "2026-01-01T00:00:00Z", "cwd": spelled.to_string_lossy() })
+            ),
+        )
+        .unwrap();
+        let session = manager
+            .create(
+                workspace.path().to_str().unwrap(),
+                Some(file.to_string_lossy().into_owned()),
+                None,
+            )
+            .unwrap();
+        wait_status(&session, Status::Idle).await;
+        let next = pool.wait_settled(Duration::from_secs(10)).await;
+        assert_eq!(next["workspace"], spelled.to_string_lossy().as_ref(), "{next}");
+        manager.stop_all();
+    }
+
+    #[tokio::test]
+    async fn a_file_nobody_wrote_in_is_not_listed() {
+        // Warm runtimes and unused new sessions leave header-only files; they must
+        // not crowd conversations out of the saved list.
+        let (manager, _home, workspace) = manager(50);
+        let directory = manager.runtime_home().join("state").join("sessions");
+        std::fs::create_dir_all(&directory).unwrap();
+        let cwd = workspace.path().to_string_lossy().replace('\\', "/");
+        std::fs::write(directory.join("blank.jsonl"), format!("{{\"type\":\"session\",\"cwd\":\"{cwd}\"}}\n")).unwrap();
+        std::fs::write(
+            directory.join("used.jsonl"),
+            format!("{{\"type\":\"session\",\"cwd\":\"{cwd}\"}}\n{{\"type\":\"message\",\"message\":{{\"role\":\"user\",\"content\":\"hi\"}}}}\n"),
+        )
+        .unwrap();
+        let listed = manager.persisted(None, true);
+        assert_eq!(listed.len(), 1, "{listed:?}");
+        assert!(listed[0]["sessionPath"].as_str().unwrap().ends_with("used.jsonl"));
+        assert!(listed[0].get("blank").is_none());
+    }
+
+    #[tokio::test]
+    async fn a_saved_session_opens_readable_in_its_own_folder() {
+        // The client is showing another folder; the conversation belongs to the
+        // folder its file names, and its transcript (tool results included) is
+        // there before any runtime answers.
+        let (manager, _home, shown) = manager(50);
+        let own = tempfile::tempdir().unwrap();
+        let file = own.path().join("old.jsonl");
+        let lines = [
+            json!({ "type": "session", "version": 3, "id": "saved", "timestamp": "2026-01-01T00:00:00Z", "cwd": own.path().to_string_lossy() }),
+            json!({ "type": "message", "message": { "role": "user", "content": [{ "type": "text", "text": "list the files" }] } }),
+            json!({ "type": "message", "message": { "role": "assistant", "content": [{ "type": "toolCall", "id": "call-1", "name": "ls", "arguments": {} }] } }),
+            json!({ "type": "message", "message": { "role": "toolResult", "toolCallId": "call-1", "toolName": "ls", "content": [{ "type": "text", "text": "a.txt" }], "isError": false } }),
+            json!({ "type": "message", "message": { "role": "assistant", "content": [{ "type": "text", "text": "One file." }] } }),
+        ];
+        std::fs::write(&file, lines.iter().map(|line| format!("{line}\n")).collect::<String>()).unwrap();
+        let session = manager
+            .create(
+                shown.path().to_str().unwrap(),
+                Some(file.to_string_lossy().into_owned()),
+                None,
+            )
+            .unwrap();
+        let history = session.history(50, None);
+        let rows = history["messages"].as_array().unwrap();
+        assert_eq!(rows.len(), 3, "{history}");
+        let texts: Vec<&str> = rows.iter().rev().filter_map(|row| row["text"].as_str()).collect();
+        assert_eq!(texts, vec!["list the files", "", "One file."]);
+        let call = rows.iter().find(|row| row["blocks"][0]["type"] == "toolCall").unwrap();
+        assert_eq!(call["blocks"][1]["type"], "toolResult", "{call}");
+        assert_eq!(call["blocks"][1]["result"]["content"][0]["text"], "a.txt");
+        let info = session.info();
+        assert_eq!(info["title"], "list the files");
+        assert_eq!(
+            std::fs::canonicalize(info["workspacePath"].as_str().unwrap()).unwrap(),
+            std::fs::canonicalize(own.path()).unwrap(),
+        );
+        wait_status(&session, Status::Idle).await;
+        assert_eq!(session.history(50, None)["messages"].as_array().unwrap().len(), 3);
+        manager.stop_all();
+    }
+
+    #[tokio::test]
+    async fn a_saved_tool_call_with_no_result_reads_as_interrupted() {
+        // The app closed while a tool ran: the saved file has the call, no result.
+        let (manager, _home, shown) = manager(50);
+        let own = tempfile::tempdir().unwrap();
+        let file = own.path().join("cut.jsonl");
+        let lines = [
+            json!({ "type": "session", "version": 3, "id": "cut", "timestamp": "2026-01-01T00:00:00Z", "cwd": own.path().to_string_lossy() }),
+            json!({ "type": "message", "message": { "role": "user", "content": [{ "type": "text", "text": "build it" }] } }),
+            json!({ "type": "message", "message": { "role": "assistant", "content": [{ "type": "thinking", "thinking": "plan" }, { "type": "toolCall", "id": "call-9", "name": "bash", "arguments": {} }], "stopReason": "toolUse" } }),
+        ];
+        std::fs::write(&file, lines.iter().map(|line| format!("{line}\n")).collect::<String>()).unwrap();
+        let session = manager
+            .create(shown.path().to_str().unwrap(), Some(file.to_string_lossy().into_owned()), None)
+            .unwrap();
+        let history = session.history(50, None);
+        let reply = history["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["kind"] == "assistant")
+            .unwrap()
+            .clone();
+        let blocks = reply["blocks"].as_array().unwrap();
+        assert_eq!(blocks[0]["type"], "thinking", "{reply}");
+        let result = blocks.iter().find(|block| block["type"] == "toolResult").unwrap();
+        assert_eq!(result["toolCallId"], "call-9");
+        assert_eq!(result["interrupted"], true);
+        assert_eq!(result["ok"], false);
+        assert_eq!(reply["stopReason"], "toolUse");
+        manager.stop_all();
+    }
+
+    #[tokio::test]
+    async fn a_new_session_in_a_folder_keeps_the_spelling_its_sessions_use() {
+        let (manager, _home, workspace) = manager(50);
+        let folder = std::fs::canonicalize(workspace.path()).unwrap();
+        // An older session spells the folder differently (as \\?\C:\x vs C:\x on Windows).
+        let spelled = format!("{}/", folder.to_string_lossy());
+        let directory = manager.runtime_home().join("state").join("sessions");
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(
+            directory.join("older.jsonl"),
+            format!(
+                "{}\n",
+                json!({ "type": "session", "version": 3, "id": "older", "timestamp": "2026-01-01T00:00:00Z", "cwd": spelled })
+            ),
+        )
+        .unwrap();
+        assert_eq!(manager.folder_text(&folder), spelled);
+        let session = manager
+            .create_pending(workspace.path().to_str().unwrap(), None, None)
+            .unwrap();
+        let path = session.info()["sessionPath"].as_str().unwrap().to_string();
+        let header: Value = serde_json::from_str(
+            std::fs::read_to_string(&path).unwrap().lines().next().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(header["cwd"], spelled.as_str());
+    }
+
+    #[tokio::test]
+    async fn a_model_chosen_before_start_that_fails_is_reported_and_not_shown() {
+        let (manager, _home, workspace) = manager(50);
+        let session = manager
+            .create_pending(workspace.path().to_str().unwrap(), None, None)
+            .unwrap();
+        session.select_model("fixture", "missing").await.unwrap();
+        assert_eq!(session.info()["model"]["id"], "missing");
+        session.send("first", "hello").unwrap();
+        wait_status(&session, Status::Idle).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let (events, _) = session.events_after(1);
+        let notice = events
+            .iter()
+            .find(|event| event.event == "session.notice")
+            .expect("a notice for the failed switch");
+        assert_eq!(notice.data["level"], "error");
+        assert!(notice.data["message"].as_str().unwrap().contains("missing"));
+        // The session now shows the model the runtime really uses.
+        assert_eq!(session.info()["model"]["id"], "model", "{}", session.info());
+    }
+
+    #[tokio::test]
+    async fn a_copy_of_an_open_conversation_is_refused_at_once() {
+        let (manager, _home, workspace) = manager(50);
+        let header = json!({ "type": "session", "version": 3, "id": "same-conversation", "timestamp": "2026-01-01T00:00:00Z", "cwd": workspace.path().to_string_lossy() });
+        let first = workspace.path().join("first.jsonl");
+        let copy = workspace.path().join("copy.jsonl");
+        std::fs::write(&first, format!("{header}\n")).unwrap();
+        std::fs::write(&copy, format!("{header}\n")).unwrap();
+        let open = manager
+            .create(workspace.path().to_str().unwrap(), Some(first.to_string_lossy().into_owned()), None)
+            .unwrap();
+        wait_status(&open, Status::Idle).await;
+        let error = manager
+            .create(workspace.path().to_str().unwrap(), Some(copy.to_string_lossy().into_owned()), None)
+            .err()
+            .expect("a second owner is refused");
+        assert_eq!(error.code, "session-open-elsewhere");
+        // The same file again is the same session, not a conflict.
+        let again = manager
+            .create(workspace.path().to_str().unwrap(), Some(first.to_string_lossy().into_owned()), None)
+            .unwrap();
+        assert_eq!(again.id, open.id);
+        manager.stop_all();
+    }
+
+    #[tokio::test]
+    async fn two_new_sessions_in_a_row_both_get_a_started_runtime() {
+        let (manager, _home, workspace) = manager(50);
+        let pool = manager.enable_warm_runtime().expect("warm pool");
+        let folder = std::fs::canonicalize(workspace.path()).unwrap();
+        pool.aim(&folder);
+        // The first is ready, then the spare starts and becomes ready.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !(pool.status()["warm"] == 2 && pool.status()["state"] == "ready") && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_eq!(pool.status()["warm"], 2, "{}", pool.status());
+        let first = manager.create_pending(workspace.path().to_str().unwrap(), None, Some("a".into())).unwrap();
+        first.send("one", "hello").unwrap();
+        let second = manager.create_pending(workspace.path().to_str().unwrap(), None, Some("b".into())).unwrap();
+        second.send("two", "hello").unwrap();
+        assert_ne!(first.runtime_pid(), second.runtime_pid());
+        wait_status(&first, Status::Idle).await;
+        wait_status(&second, Status::Idle).await;
+        manager.stop_all();
     }
 
     #[tokio::test]
@@ -2989,8 +4150,9 @@ mod session_tests {
                 .unwrap();
             match event.0.as_str() {
                 "message.delta" => deltas.push_str(event.1["text"].as_str().unwrap()),
-                "message.done" => {
-                    assert_eq!(event.1["stopReason"], "completed");
+                "message.done" => assert_eq!(event.1["stopReason"], "stop"),
+                "turn.end" => {
+                    assert_eq!(event.1["status"], "completed");
                     break;
                 }
                 _ => {}
@@ -3076,7 +4238,9 @@ mod session_tests {
         let _ = next_event(&mut rx, "message.delta").await;
         session.interrupt().unwrap();
         let done = next_event(&mut rx, "message.done").await;
-        assert_eq!(done["stopReason"], "interrupted");
+        assert_eq!(done["stopReason"], "aborted");
+        let end = next_event(&mut rx, "turn.end").await;
+        assert_eq!(end["status"], "interrupted");
         wait_status(&session, Status::Idle).await;
         reader.abort();
     }
@@ -3094,6 +4258,102 @@ mod session_tests {
         assert_eq!(receipt["receipt"], "cancelled");
         let history = session.history(10, None);
         assert_eq!(history["messages"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_turn_leaves_timing_lines_without_content() {
+        let (manager, home, workspace) = manager(50);
+        let session = manager
+            .create(workspace.path().to_str().unwrap(), None, None)
+            .unwrap();
+        wait_status(&session, Status::Idle).await;
+        session.send("timed", "secret words").unwrap();
+        wait_status(&session, Status::Idle).await;
+        let log = std::fs::read_to_string(home.path().join("logs").join("host.log")).unwrap();
+        let marks: Vec<String> = log
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter(|line| line["event"] == "timing" && line["fields"]["clientMessageId"] == "timed")
+            .map(|line| line["fields"]["mark"].as_str().unwrap_or_default().to_string())
+            .collect();
+        for expected in ["message.accepted", "turn.start", "message.first_output", "turn.end"] {
+            assert!(marks.iter().any(|mark| mark == expected), "{expected} missing from {marks:?}");
+        }
+        assert!(!log.contains("secret words"), "timing must not log content");
+    }
+
+    #[tokio::test]
+    async fn content_streams_only_to_the_viewer_and_state_to_everyone() {
+        let (manager, _home, workspace) = manager(50);
+        let shown = manager.create(workspace.path().to_str().unwrap(), None, None).unwrap();
+        let other = manager.create(workspace.path().to_str().unwrap(), None, None).unwrap();
+        let _stream = manager.connect_client("window");
+        manager.hold("window", &shown.id);
+        let event = |session: &str, name: &str| crate::events::HubEvent {
+            seq: 1,
+            session_id: session.to_string(),
+            session_seq: 1,
+            event: name.to_string(),
+            data: json!({}),
+        };
+        assert!(!super::withheld(&manager, Some("window"), &event(&shown.id, "message.delta")));
+        assert!(super::withheld(&manager, Some("window"), &event(&other.id, "message.delta")));
+        assert!(super::withheld(&manager, Some("window"), &event(&other.id, "tool.update")));
+        for state in ["turn.start", "turn.end", "session.status", "session.updated", "message.accepted"] {
+            assert!(!super::withheld(&manager, Some("window"), &event(&other.id, state)), "{state}");
+        }
+        // A client that never opened a session sees state only; an anonymous stream sees everything.
+        let _quiet = manager.connect_client("quiet");
+        assert!(super::withheld(&manager, Some("quiet"), &event(&shown.id, "message.delta")));
+        assert!(!super::withheld(&manager, None, &event(&other.id, "message.delta")));
+        // Viewing another session moves the content with it.
+        manager.hold("window", &other.id);
+        assert!(super::withheld(&manager, Some("window"), &event(&shown.id, "message.delta")));
+        assert!(!super::withheld(&manager, Some("window"), &event(&other.id, "message.delta")));
+    }
+
+    #[tokio::test]
+    async fn session_operations_have_their_own_routes() {
+        let (manager, _home, workspace) = manager(50);
+        let path = workspace.path().to_str().unwrap();
+        let pending = manager.create_pending(path, None, None).unwrap();
+        let session = manager.create(path, None, None).unwrap();
+        wait_status(&session, Status::Idle).await;
+        let app = app(manager);
+        let stats = |id: &str| request(Method::GET, &format!("/v1/sessions/{id}/stats")).body(Body::empty()).unwrap();
+        let (status, _, body) = call(app.clone(), stats(&pending.id)).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(body.contains("\"stats\":null"), "{body}");
+        let (status, _, body) = call(
+            app.clone(),
+            request(Method::POST, &format!("/v1/sessions/{}/export", session.id))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(json!({ "outputPath": " " }).to_string()))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        let (status, _, _) = call(
+            app,
+            request(Method::POST, &format!("/v1/sessions/{}/command", session.id))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(json!({ "type": "get_state" }).to_string()))
+                .unwrap(),
+        )
+        .await;
+        assert_ne!(status, StatusCode::OK, "raw runtime commands are gone");
+    }
+
+    #[tokio::test]
+    async fn only_a_session_with_a_runtime_answers_stats() {
+        let (manager, _home, workspace) = manager(50);
+        let pending = manager
+            .create_pending(workspace.path().to_str().unwrap(), None, None)
+            .unwrap();
+        assert!(!pending.has_runtime());
+        let started = manager.create(workspace.path().to_str().unwrap(), None, None).unwrap();
+        wait_status(&started, Status::Idle).await;
+        assert!(started.has_runtime());
     }
 
     #[tokio::test]
@@ -3291,6 +4551,42 @@ mod session_tests {
         assert_eq!(missing.0, StatusCode::NOT_FOUND);
     }
     #[tokio::test]
+    async fn extension_notices_status_and_widgets_reach_clients() {
+        let (manager, _home, workspace) = manager_with_ui("notices", None);
+        let session = manager
+            .create(workspace.path().to_str().unwrap(), None, None)
+            .unwrap();
+        wait_status(&session, Status::Idle).await;
+        let app = app(manager.clone());
+        let (mut rx, reader) =
+            subscribe_as(app.clone(), &session.id, "viewer", "view").await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        session.send("client-1", "go").unwrap();
+        let notice = next_event(&mut rx, "session.notice").await;
+        assert_eq!(notice["level"], "warning");
+        assert!(notice["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("Flow control is holding"));
+        for _ in 0..50 {
+            if session.summary()["widgets"]["flow"].is_array() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let summary = session.summary();
+        assert_eq!(summary["statuses"]["flow"], "held 1");
+        assert_eq!(summary["widgets"]["flow"], json!(["line a", "line b"]));
+        reader.abort();
+        let (mut snap_rx, snap_reader) =
+            subscribe_as(app.clone(), &session.id, "late", "view").await;
+        let snapshot = next_event(&mut snap_rx, "session.snapshot").await;
+        assert_eq!(snapshot["statuses"]["flow"], "held 1");
+        snap_reader.abort();
+    }
+
+    #[tokio::test]
     async fn approval_confirm_decision_resumes_and_duplicate_is_resolved() {
         let (manager, _home, workspace) = manager_with_ui("confirm", None);
         let session = manager
@@ -3318,6 +4614,10 @@ mod session_tests {
         let info = session_info(&app, &session.id).await;
         assert_eq!(info["pendingApprovalCount"], 1);
         assert_eq!(info["status"], "waiting_approval");
+        // The detail shows the turn in progress exactly as the session list does.
+        assert_eq!(info["activeTurn"]["turnId"], "m-1");
+        assert_eq!(info["activeTurn"]["phase"], "running");
+        assert_eq!(info["activeTurn"], session.summary()["activeTurn"]);
 
         let unauthenticated = call(
             app.clone(),
@@ -3362,6 +4662,126 @@ mod session_tests {
             session_info(&app, &session.id).await["pendingApprovalCount"],
             0
         );
+        reader.abort();
+    }
+
+    #[tokio::test]
+    async fn a_connected_client_keeps_only_the_session_it_has_open() {
+        let (manager, _home, workspace) = manager(50);
+        let path = workspace.path().to_str().unwrap();
+        let first = manager.create(path, None, Some("first".into())).unwrap();
+        let second = manager.create(path, None, Some("second".into())).unwrap();
+        wait_status(&first, Status::Idle).await;
+        wait_status(&second, Status::Idle).await;
+
+        let stream = manager.connect_client("desktop");
+        manager.hold("desktop", &first.id);
+        manager.hold("desktop", &second.id);
+        manager.reap_idle(Duration::ZERO);
+        assert!(
+            manager.get(&first.id).is_none(),
+            "a session the client left is reaped"
+        );
+        assert!(
+            manager.get(&second.id).is_some(),
+            "the open session is kept"
+        );
+
+        drop(stream);
+        let reconnected = manager.connect_client("desktop");
+        manager.reap_idle(Duration::ZERO);
+        assert!(
+            manager.get(&second.id).is_some(),
+            "a reconnected stream keeps its hold"
+        );
+
+        drop(reconnected);
+        manager.reap_idle(Duration::ZERO);
+        assert!(manager.get(&second.id).is_none(), "a closed stream holds nothing");
+    }
+
+    #[tokio::test]
+    async fn a_new_session_the_client_has_open_is_kept_before_its_first_message() {
+        let (manager, _home, workspace) = manager(50);
+        let session = manager
+            .create_pending(workspace.path().to_str().unwrap(), None, None)
+            .unwrap();
+        let _stream = manager.connect_client("desktop");
+        manager.hold("desktop", &session.id);
+        manager.reap_idle(Duration::ZERO);
+        assert!(manager.get(&session.id).is_some());
+    }
+
+    #[tokio::test]
+    async fn a_client_without_a_stream_holds_nothing() {
+        let (manager, _home, workspace) = manager(50);
+        let session = manager
+            .create(workspace.path().to_str().unwrap(), None, None)
+            .unwrap();
+        wait_status(&session, Status::Idle).await;
+        manager.hold("desktop", &session.id);
+        manager.reap_idle(Duration::ZERO);
+        assert!(manager.get(&session.id).is_none());
+    }
+
+    #[tokio::test]
+    async fn global_stream_client_can_answer_approvals() {
+        let (manager, _home, workspace) = manager_with_ui("confirm", None);
+        let session = manager
+            .create(workspace.path().to_str().unwrap(), None, None)
+            .unwrap();
+        wait_status(&session, Status::Idle).await;
+        let app = app(manager.clone());
+        let response = app
+            .clone()
+            .oneshot(
+                request(
+                    Method::GET,
+                    "/v1/events?clientId=global-ui&capabilities=view,control,prompts",
+                )
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let reader = tokio::spawn(read_sse(response, tx));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        session.send("client-1", "go").unwrap();
+        let mut approval_id = String::new();
+        for _ in 0..100 {
+            let summary = session.summary();
+            if let Some(id) = summary["pendingApprovals"][0]["approvalId"].as_str() {
+                approval_id = id.to_string();
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(
+            !approval_id.is_empty(),
+            "summary carries the pending approval"
+        );
+
+        let (status, _) = post_json(
+            app.clone(),
+            &format!("/v1/approvals/{approval_id}/decision"),
+            json!({ "clientId": "never-connected", "decision": "Approve" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        let (status, body) = post_json(
+            app.clone(),
+            &format!("/v1/approvals/{approval_id}/decision"),
+            json!({ "clientId": "global-ui", "decision": "Approve" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["state"], "allowed");
+        wait_status(&session, Status::Idle).await;
+        assert_eq!(session.summary()["pendingApprovals"], json!([]));
         reader.abort();
     }
 
@@ -3616,6 +5036,22 @@ mod session_tests {
             .unwrap();
         assert_eq!(state["model"]["id"], "model");
         assert_eq!(state["thinkingLevel"], "off");
+    }
+
+    #[tokio::test]
+    async fn the_summary_reports_time_to_first_output() {
+        let (manager, _home, workspace) = manager(50);
+        let session = manager
+            .create(workspace.path().to_str().unwrap(), None, None)
+            .unwrap();
+        wait_status(&session, Status::Idle).await;
+        assert_eq!(session.summary()["firstOutput"]["turns"], 0);
+        assert!(session.summary()["firstOutput"]["avgMs"].is_null());
+        session.send("ttft", "hello").unwrap();
+        wait_status(&session, Status::Idle).await;
+        let first = &session.summary()["firstOutput"];
+        assert_eq!(first["turns"], 1, "{first}");
+        assert!(first["avgMs"].as_u64().is_some(), "{first}");
     }
 
     #[tokio::test]

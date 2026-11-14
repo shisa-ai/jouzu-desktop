@@ -35,6 +35,10 @@ export class HostChatSession {
     return new HostChatSession(api, handle.sessionId, clientId, handle);
   }
 
+  get sessionPath(): string | null {
+    return this.handle.sessionPath ?? null;
+  }
+
   history(page: { limit?: number; before?: number } = {}): Promise<HistoryPage> {
     return this.api.sessions.history(this.id, page);
   }

@@ -1,4 +1,4 @@
-import { Compass, FolderOpen, Image as ImageIcon, SquareTerminal } from "lucide-react";
+import { Compass, FolderOpen, Image as ImageIcon } from "lucide-react";
 
 interface Entry {
   id: string;
@@ -11,7 +11,6 @@ interface Entry {
 const ENTRIES: Entry[] = [
   { id: "artifacts", title: "Artifacts", description: "Images and files produced in this session.", icon: ImageIcon, available: true },
   { id: "files", title: "Workspace files", description: "Browse files in this session's workspace.", icon: FolderOpen, available: true },
-  { id: "terminal", title: "New terminal", description: "Run commands in the session workspace.", icon: SquareTerminal, available: false },
 ];
 
 /** The pane's Start tab: pick which view to open, like DSH's session Start. */

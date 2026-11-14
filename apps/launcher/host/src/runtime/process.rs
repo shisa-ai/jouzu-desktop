@@ -32,7 +32,13 @@ pub fn spawn(spec: &SpawnSpec) -> io::Result<Spawned> {
     {
         const CREATE_SUSPENDED: u32 = 0x0000_0004;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        command.creation_flags(CREATE_SUSPENDED | CREATE_NO_WINDOW);
+        const BELOW_NORMAL_PRIORITY_CLASS: u32 = 0x0000_4000;
+        let priority = if spec.low_priority {
+            BELOW_NORMAL_PRIORITY_CLASS
+        } else {
+            0
+        };
+        command.creation_flags(CREATE_SUSPENDED | CREATE_NO_WINDOW | priority);
     }
 
     let child = command.spawn()?;
@@ -54,6 +60,37 @@ pub fn spawn(spec: &SpawnSpec) -> io::Result<Spawned> {
     }
 
     Ok(Spawned { child, job, pid })
+}
+
+/// Move a runtime between below-normal and normal priority. Best effort: a
+/// process that already exited needs nothing.
+pub fn set_low_priority(pid: u32, low: bool) {
+    #[cfg(windows)]
+    unsafe {
+        use windows::Win32::{
+            Foundation::CloseHandle,
+            System::Threading::{
+                OpenProcess, SetPriorityClass, BELOW_NORMAL_PRIORITY_CLASS,
+                NORMAL_PRIORITY_CLASS, PROCESS_SET_INFORMATION,
+            },
+        };
+        if pid == 0 {
+            return;
+        }
+        if let Ok(handle) = OpenProcess(PROCESS_SET_INFORMATION, false, pid) {
+            let class = if low {
+                BELOW_NORMAL_PRIORITY_CLASS
+            } else {
+                NORMAL_PRIORITY_CLASS
+            };
+            let _ = SetPriorityClass(handle, class);
+            let _ = CloseHandle(handle);
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (pid, low);
+    }
 }
 
 #[cfg(windows)]

@@ -2,6 +2,7 @@ import { LoaderCircle } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { Button } from '../components/ui/button';
+import { ErrorLine } from "../session-alerts-view";
 
 /** One row of the System section: which copy a component uses, and what is still missing. */
 export function ComponentSection({ title, status, note, tone, busy, error, install, installLabel }: {
@@ -21,7 +22,7 @@ export function ComponentSection({ title, status, note, tone, busy, error, insta
         {<Button disabled={busy || !install} onClick={install}>{installLabel}</Button>}
     </div>
     {note && <p role="status" className="text-xs text-muted-foreground">{note}</p>}
-    {error && <p role="alert" className="text-xs text-destructive">{error}</p>}
+    {error && <ErrorLine raw={error} failed="This component action did not complete." />}
   </section>;
 }
 

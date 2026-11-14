@@ -6,3 +6,5 @@ src-tauri/gen/
 test-results/
 playwright-report/
 e2e-runtime/*-result.json
+.build-id
+.build-commit

@@ -8,6 +8,7 @@ import { Button } from "./components/ui/button";
 import { ImageViewer } from "./components/image-viewer";
 import { ChatMarkdown } from "./chat-markdown";
 import type { OutputReference } from "./artifact-references";
+import { ErrorLine } from "./session-alerts-view";
 
 interface ArtifactRecord {
   id: string;
@@ -147,7 +148,7 @@ export function ArtifactsPanel({ sessionId, references = [], workspace, embedded
       <CardDescription>{sessionId ? "AI outputs for this session. Save freezes a copy into the artifact store; unsaved items stay in the workspace." : "Saved artifacts, newest first."}</CardDescription>
     </CardHeader>}
     <CardContent className={embedded ? "space-y-4 p-0" : "space-y-4"}>
-      {error && <p role="alert" className="text-xs text-destructive">{error}</p>}
+      {error && <ErrorLine raw={error} failed="This artifacts action did not complete." onDismiss={() => setError(null)} />}
       {!items && !error && <p className="text-sm text-muted-foreground">Loading artifacts…</p>}
       {items && !visible.length && <p className="text-sm text-muted-foreground">No AI outputs in this session yet.</p>}
       {items && visible.length > 0 && <>

@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { FileText, FolderOpen } from "lucide-react";
 import { Button } from "./components/ui/button";
 import { ChatMarkdown } from "./chat-markdown";
+import { ErrorLine } from "./session-alerts-view";
 
 interface Preview {
   binary: boolean;
@@ -70,10 +71,10 @@ export function FilePreview({ path, workspace, onClose }: { path: string; worksp
         </div>
       </div>
       <p className="truncate border-b border-border px-4 py-1 font-mono text-[10px] text-muted-foreground" title={path}>{path}</p>
-      {revealError && <p role="alert" className="border-b border-border px-4 py-1 text-xs text-destructive">{revealError}</p>}
+      {revealError && <div className="border-b border-border px-4 py-1"><ErrorLine raw={revealError} failed="Could not show the file in its folder." onDismiss={() => setRevealError(null)} /></div>}
       <div className="min-h-0 flex-1 overflow-auto p-4">
         {!preview && !error && <p className="text-sm text-muted-foreground">Opening…</p>}
-        {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
+        {error && <ErrorLine raw={error} failed="Could not open this file." />}
         {preview?.binary && <p className="text-sm text-muted-foreground">This file is not text. Use Reveal to open it in its own application.</p>}
         {preview?.truncated && <p className="text-sm text-muted-foreground">This file is {formatBytes(preview.bytes)}; too large to preview. Use Reveal to open it.</p>}
         {preview && !preview.binary && !preview.truncated && (MARKDOWN.test(path) ? <ChatMarkdown text={preview.text} /> : <pre className="whitespace-pre-wrap break-words font-mono text-xs leading-5">{preview.text}</pre>)}

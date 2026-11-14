@@ -46,6 +46,17 @@ describe("HostClient", () => {
     });
   });
 
+  test("opens a session as this client, so the host keeps it while it is open", async () => {
+    let body: Record<string, unknown> | undefined;
+    const fetchImpl = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      body = JSON.parse(String(init?.body));
+      return response({ sessionId: "h1", status: "starting", cursor: 0 }, 202);
+    }) as typeof fetch;
+    const client = new HostClient({ baseUrl: "", clientId: "web-test", fetchImpl });
+    await client.attach("C:/w", "C:/s/one.jsonl");
+    expect(body).toEqual({ workspacePath: "C:/w", sessionPath: "C:/s/one.jsonl", clientId: "web-test" });
+  });
+
   test("uses model and thinking endpoints", async () => {
     const calls: Call[] = [];
     const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -94,15 +105,15 @@ describe("HostClient", () => {
     expect(JSON.parse(String(calls[1].init?.body))).toEqual({ image: { provider: "shisa" } });
   });
 
-  test("unwraps command data and maps error envelopes", async () => {
+  test("unwraps session stats and maps error envelopes", async () => {
     const fetchImpl = (async (input: RequestInfo | URL) => {
-      if (String(input).endsWith("/v1/sessions/h1/command")) {
-        return response({ data: { models: [] } });
+      if (String(input).endsWith("/v1/sessions/h1/stats")) {
+        return response({ stats: null });
       }
       return response({ error: { code: "prompt-resolved", message: "already", retryable: false } }, 409);
     }) as typeof fetch;
     const client = new HostClient({ fetchImpl });
-    await expect(client.command("h1", { type: "get_available_models" })).resolves.toEqual({ models: [] });
+    await expect(client.stats("h1")).resolves.toBeNull();
     await expect(client.approve("a1", "Approve")).rejects.toMatchObject<Partial<ApiError>>({
       code: "prompt-resolved",
       retryable: false,
@@ -137,5 +148,19 @@ describe("HostClient", () => {
       { id: 4, event: "message.delta" },
       { id: 5, event: "message.done" },
     ]);
+  });
+  test("registers prompt capabilities on the global event stream", async () => {
+    let url = "";
+    const fetchImpl = (async (input: RequestInfo | URL) => {
+      url = String(input);
+      return new Response(new ReadableStream({ start(controller) { controller.close(); } }), { status: 200, headers: { "content-type": "text/event-stream" } });
+    }) as typeof fetch;
+    const client = new HostClient({ baseUrl: "http://host", fetchImpl });
+    const stop = client.subscribeEvents("ui-1", 0, () => {});
+    await new Promise(resolve => setTimeout(resolve, 10));
+    stop();
+    const query = new URL(url).searchParams;
+    expect(query.get("clientId")).toBe("ui-1");
+    expect(query.get("capabilities")?.split(",")).toEqual(expect.arrayContaining(["prompts", "control"]));
   });
 });

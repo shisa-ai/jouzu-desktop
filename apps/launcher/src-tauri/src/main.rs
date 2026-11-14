@@ -23,6 +23,7 @@ mod jouzu_update;
 mod environment;
 mod runtime;
 mod image_tool;
+mod update_channel;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -497,6 +498,8 @@ fn component_versions(app: tauri::AppHandle) -> Result<serde_json::Value, String
         "jouzu": value.get("version").and_then(|v| v.as_str()),
         "development": cfg!(debug_assertions),
         "launcherUpdaterConfigured": launcher_updater,
+        "build": env!("JOUZU_BUILD_ID"),
+        "commit": env!("JOUZU_COMMIT"),
     }))
 }
 
@@ -573,6 +576,7 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .manage(update_channel::Pending::default())
         .setup(|app| {
             migration::migrate_legacy_launcher_data()
                 .map_err(std::io::Error::other)?;
@@ -580,7 +584,13 @@ fn main() {
                 logs::append(
                     &managed,
                     "launcher.log",
-                    &format!("launcher start version={}", env!("CARGO_PKG_VERSION")),
+                    &format!(
+                        "launcher start version={} build={} commit={} channel={:?}",
+                        env!("CARGO_PKG_VERSION"),
+                        env!("JOUZU_BUILD_ID"),
+                        env!("JOUZU_COMMIT"),
+                        update_channel::read(&managed)
+                    ),
                 );
             }
             if let Ok(executable) = std::env::current_exe() {
@@ -592,7 +602,17 @@ fn main() {
                 .map_err(std::io::Error::other)?
                 .join("cache/webview");
             std::fs::create_dir_all(&data)?;
-            let host_url = host_bootstrap::start(app.handle()).map_err(std::io::Error::other)?;
+            let host_url = host_bootstrap::start(app.handle()).map_err(|error| {
+                if let Ok(managed) = runtime::managed_root() {
+                    logs::append(
+                        &managed,
+                        "launcher.log",
+                        &format!("host start failed: {error}"),
+                    );
+                }
+                host_bootstrap::show_start_failure(&error);
+                std::io::Error::other(error)
+            })?;
             let host_url: url::Url = host_url
                 .parse()
                 .map_err(|error| std::io::Error::other(format!("Invalid host URL: {error}")))?;
@@ -681,6 +701,10 @@ fn main() {
             forget_workspace,
             add_workspaces,
             component_versions,
+            update_channel::update_channel,
+            update_channel::update_channel_set,
+            update_channel::update_check,
+            update_channel::update_install,
             model_catalog,
             runtime_report,
             runtime_install,

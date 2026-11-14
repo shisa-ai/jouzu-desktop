@@ -16,6 +16,8 @@ import {
   type Model,
   type Receipt,
   type RuntimeStatus,
+  type WarmRuntime,
+  type TimingMark,
   type SessionHandle,
   type SessionSummary,
   type Workspace,
@@ -172,7 +174,9 @@ export class HostClient {
     onEvent: (event: ApiEvent) => void,
     onError?: (error: unknown) => void,
   ): Unsubscribe {
-    const query = new URLSearchParams({ clientId });
+    // The host registers this client's capabilities from the stream it opens;
+    // without "prompts" every approval or answer from this window is refused.
+    const query = new URLSearchParams({ clientId, capabilities: "view,control,prompts" });
     if (after > 0) query.set("after", String(after));
     return this.stream(`/v1/events?${query}`, (id, event, data) => {
       onEvent({
@@ -267,15 +271,26 @@ export class HostClient {
       const key = (session.sessionPath ?? session.sessionId ?? session.workspacePath)
         .replace(/^\\\\\?\\/u, "")
         .toLowerCase();
-      byPath.set(key, session);
+      // The live record says what the session is doing now; what it does not know
+      // (an empty title, no time yet) never hides what the saved file says.
+      const saved = byPath.get(key);
+      const known = Object.fromEntries(Object.entries(session).filter(([, value]) => value !== null && value !== undefined && value !== ""));
+      byPath.set(key, saved ? { ...saved, ...known } as SessionSummary : session);
     }
     return [...byPath.values()];
+  }
+
+  async view(sessionId: string): Promise<void> {
+    await this.request(`/v1/sessions/${encodeURIComponent(sessionId)}/view`, {
+      method: "POST",
+      body: JSON.stringify({ clientId: this.clientId }),
+    });
   }
 
   attach(workspacePath: string, sessionPath?: string): Promise<SessionHandle> {
     return this.request<SessionHandle>("/v1/sessions", {
       method: "POST",
-      body: JSON.stringify({ workspacePath, sessionPath: sessionPath ?? null }),
+      body: JSON.stringify({ workspacePath, sessionPath: sessionPath ?? null, clientId: this.clientId }),
     });
   }
 
@@ -342,11 +357,24 @@ export class HostClient {
     });
   }
 
-  command(sessionId: string, command: Record<string, unknown>): Promise<unknown> {
-    return this.request<{ data: unknown }>(
-      `/v1/sessions/${encodeURIComponent(sessionId)}/command`,
-      { method: "POST", body: JSON.stringify(command) },
-    ).then(body => body.data);
+  stats(sessionId: string): Promise<unknown> {
+    return this.request<{ stats: unknown }>(`/v1/sessions/${encodeURIComponent(sessionId)}/stats`)
+      .then(body => body.stats ?? null);
+  }
+
+  compact(sessionId: string): Promise<unknown> {
+    return this.request(`/v1/sessions/${encodeURIComponent(sessionId)}/compact`, { method: "POST" });
+  }
+
+  exportHtml(sessionId: string, outputPath: string): Promise<unknown> {
+    return this.request(`/v1/sessions/${encodeURIComponent(sessionId)}/export`, {
+      method: "POST",
+      body: JSON.stringify({ outputPath }),
+    });
+  }
+
+  reload(sessionId: string): Promise<unknown> {
+    return this.request(`/v1/sessions/${encodeURIComponent(sessionId)}/reload`, { method: "POST" });
   }
 
   interrupt(sessionId: string): Promise<unknown> {
@@ -390,6 +418,24 @@ export class HostClient {
       method: "POST",
       body: JSON.stringify({ sessionPath }),
     }).then(body => body.sessionPath);
+  }
+
+  warm(workspacePath: string): Promise<WarmRuntime> {
+    return this.request<WarmRuntime>("/v1/runtime/warm", {
+      method: "POST",
+      body: JSON.stringify({ workspacePath }),
+    });
+  }
+
+  mark(mark: TimingMark, ids: { sessionId?: string; clientMessageId?: string } = {}): void {
+    void this.request("/v1/timing", {
+      method: "POST",
+      body: JSON.stringify({ mark, ...ids }),
+    }).catch(() => undefined);
+  }
+
+  warmState(waitMs: number): Promise<WarmRuntime> {
+    return this.request<WarmRuntime>(`/v1/runtime/warm?waitMs=${Math.max(0, Math.round(waitMs))}`);
   }
 
   timing(sessionPath: string): Promise<unknown> {

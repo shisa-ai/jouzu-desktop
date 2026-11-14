@@ -51,7 +51,15 @@ jobs:
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: npx tauri build --bundles nsis --config '{"bundle":{"createUpdaterArtifacts":true}}'
+        # A fork or a test build has no signing key; it still gets an installer,
+        # just without the signed updater artifacts.
+        run: |
+          if ($env:TAURI_SIGNING_PRIVATE_KEY) {
+            npx tauri build --bundles nsis --config '{"bundle":{"createUpdaterArtifacts":true}}'
+          } else {
+            npx tauri build --bundles nsis
+          }
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Upload Windows installer
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:

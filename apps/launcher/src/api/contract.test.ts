@@ -70,11 +70,10 @@ function client() {
     toolProviders: vi.fn(async () => ({ providers: [] })),
     toolModels: vi.fn(async () => ({ models: [] })),
     mcp: vi.fn(async () => ({ path: "C:/data/agent/mcp.json", exists: false, servers: [] })),
-    command: vi.fn(async (_id: string, request: Record<string, unknown>) => {
-      calls.push(String(request.type));
-      if (request.type === "get_available_models") return { models: [{ id: "m", name: "Model", provider: "p" }] };
-      return {};
-    }),
+    stats: vi.fn(async () => { calls.push("stats"); return null; }),
+    compact: vi.fn(async () => { calls.push("compact"); return {}; }),
+    exportHtml: vi.fn(async () => { calls.push("export"); return {}; }),
+    reload: vi.fn(async () => { calls.push("reload"); return {}; }),
     artifacts: vi.fn(async () => [{ id: "a1", kind: "images", mimeType: "image/png" }]),
     artifactCounts: vi.fn(async () => ({ h1: 1 })),
     artifact: vi.fn(async () => ({ record: { id: "a1", kind: "images", mimeType: "image/png" }, mimeType: "image/png", data: "AA==" })),
@@ -112,6 +111,8 @@ function bridge() {
   const native: NativeApi = {
     confirm: vi.fn(async () => true),
     pickFolder: vi.fn(async () => "C:/picked"),
+    saveFile: vi.fn(async () => "C:/saved.html"),
+    onFileDrop: vi.fn(() => () => {}),
     reveal: vi.fn(async () => undefined),
     openExternal: vi.fn(async () => undefined),
     terminal: vi.fn(async () => undefined),
@@ -156,12 +157,12 @@ describe("A-API contract suite", () => {
     await expect(api.settings.environment.read()).resolves.toBeDefined();
     await expect(api.commands.compact("h1")).resolves.toBeUndefined();
     await expect(api.commands.exportHtml("h1", "C:/out.html")).resolves.toBeUndefined();
-    await expect(api.commands.reload("h1", "C:/sessions/h1.jsonl")).resolves.toBeUndefined();
+    await expect(api.commands.reload("h1")).resolves.toBeUndefined();
     const unsubscribe = api.subscribe("h1", "c", ["view"], 0, () => {});
     expect(typeof unsubscribe).toBe("function");
     unsubscribe();
     await expect(api.models.list("h1")).resolves.toEqual([{ id: "m", name: "Model", provider: "p" }]);
-    await expect(api.commands.raw("h1", { type: "get_state" })).resolves.toEqual({});
+    await expect(api.commands.stats("h1")).resolves.toBeDefined();
   });
 
   test.each(platforms())("$name: native differs only by capability", async ({ api, native }) => {

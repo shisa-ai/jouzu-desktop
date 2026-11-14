@@ -13,13 +13,14 @@ pub struct HostProcess(pub Mutex<Option<(Child, isize)>>);
 pub fn start(app: &tauri::AppHandle) -> Result<String, String> {
     let managed = crate::runtime::managed_root()?;
     let runtime_home = crate::runtime::effective_home()?;
-    let dist = dist_dir()?;
+    let dist = dist_dir(app)?;
     let binary = host_binary(app)?;
     let info_path = managed.join("host.json");
     // A previous host may have left discovery behind. Never navigate to that
     // stale port while the new host is starting.
     let _ = std::fs::remove_file(&info_path);
-    let mut child = Command::new(&binary)
+    let mut command = Command::new(&binary);
+    command
         .arg("--dist")
         .arg(&dist)
         .arg("--home")
@@ -28,7 +29,16 @@ pub fn start(app: &tauri::AppHandle) -> Result<String, String> {
         .arg(&runtime_home)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::null());
+    // The host is a console program; without this flag Windows opens an empty
+    // console window next to the app.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    let mut child = command
         .spawn()
         .map_err(|error| format!("Could not start the host: {error}"))?;
     let job = match create_job(child.id()) {
@@ -51,6 +61,12 @@ pub fn start(app: &tauri::AppHandle) -> Result<String, String> {
                 let port = value.get("port").and_then(Value::as_u64);
                 let token = value.get("token").and_then(Value::as_str);
                 if let (Some(port), Some(token)) = (port, token) {
+                    if let Err(error) = check_build(value.get("build").and_then(Value::as_str)) {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        close_job(job);
+                        return Err(error);
+                    }
                     app.manage(HostProcess(Mutex::new(Some((child, job)))));
                     return Ok(format!("http://127.0.0.1:{port}/?token={token}"));
                 }
@@ -125,20 +141,67 @@ fn create_job(_pid: u32) -> Result<isize, String> {
 #[cfg(not(windows))]
 fn close_job(_job: isize) {}
 
-fn dist_dir() -> Result<PathBuf, String> {
-    let dev = Path::new(env!("CARGO_MANIFEST_DIR")).join("../dist");
-    if dev.join("index.html").is_file() {
-        return Ok(dev);
+/// The app cannot open without its host, and it closes as soon as setup fails,
+/// so say why in a native message box rather than vanishing.
+#[cfg(windows)]
+pub fn show_start_failure(message: &str) {
+    use windows::core::PCWSTR;
+    use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
+    let wide = |text: &str| text.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
+    let text = wide(message);
+    let caption = wide("Jouzu Desktop could not start");
+    unsafe {
+        MessageBoxW(
+            None,
+            PCWSTR(text.as_ptr()),
+            PCWSTR(caption.as_ptr()),
+            MB_OK | MB_ICONERROR,
+        );
     }
-    let current = std::env::current_exe().map_err(|error| error.to_string())?;
-    let beside = current
-        .parent()
-        .ok_or("Executable has no directory")?
+}
+
+#[cfg(not(windows))]
+pub fn show_start_failure(message: &str) {
+    eprintln!("Jouzu Desktop could not start: {message}");
+}
+
+/// The UI the host serves. A development build serves the repository's `dist`;
+/// a release serves only the copy installed with it, so it never picks up
+/// whatever happens to be built on the machine that compiled it.
+fn dist_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    #[cfg(debug_assertions)]
+    {
+        let dev = Path::new(env!("CARGO_MANIFEST_DIR")).join("../dist");
+        if dev.join("index.html").is_file() {
+            return Ok(dev);
+        }
+    }
+    let installed = app
+        .path()
+        .resource_dir()
+        .map_err(|error| error.to_string())?
         .join("dist");
-    if beside.join("index.html").is_file() {
-        return Ok(beside);
+    if installed.join("index.html").is_file() {
+        return Ok(installed);
     }
-    Err("Could not find the built UI directory".into())
+    Err("This installation has no UI files. Reinstall Jouzu Desktop.".into())
+}
+
+/// A release shell runs only the host built with it (see scripts/build-app.mjs).
+/// A host from another build speaks an older contract and fails in ways that
+/// look like ordinary bugs, so refuse it plainly instead.
+fn check_build(host_build: Option<&str>) -> Result<(), String> {
+    let expected = env!("JOUZU_BUILD_ID");
+    if cfg!(debug_assertions) || expected == "dev" {
+        return Ok(());
+    }
+    match host_build {
+        Some(found) if found == expected => Ok(()),
+        found => Err(format!(
+            "This installation is mixed: the app is build {expected} but its host is build {}. Reinstall Jouzu Desktop.",
+            found.unwrap_or("unknown")
+        )),
+    }
 }
 
 fn host_binary(app: &tauri::AppHandle) -> Result<PathBuf, String> {

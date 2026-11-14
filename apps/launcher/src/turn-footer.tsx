@@ -3,6 +3,7 @@ import { Check, Copy, Database, GitFork } from "lucide-react";
 import { Button } from "./components/ui/button";
 import { StatCard, StatPopover, StatRow } from "./components/stat-popover";
 import type { ChatMessage } from "./chat-projection";
+import { providerLabel } from "./provider-label";
 
 function compact(value: number) {
   if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1).replace(/\.0$/, "")}M`;
@@ -14,12 +15,6 @@ function exact(value: number) {
 }
 function percentage(value: number) {
   return `${Number.isInteger(value) ? value : value.toFixed(1)}%`;
-}
-function providerLabel(provider?: string) {
-  if (!provider) return "—";
-  if (!provider.startsWith("catalog:")) return provider;
-  const parts = provider.split(":");
-  return parts[2] || parts[1] || provider;
 }
 function duration(ms: number) {
   const seconds = Math.max(0, Math.round(ms / 1000));

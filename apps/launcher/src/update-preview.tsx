@@ -3,7 +3,9 @@ import { Dialog, DialogContent, DialogTitle, DialogDescription, DialogClose } fr
 import { useEffect, useRef, useState } from 'react';
 import { Button } from './components/ui/button';
 import { Progress } from './components/ui/progress';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './components/ui/select';
 import type { Locale } from './i18n';
+import { ErrorLine } from "./session-alerts-view";
 
 /** The two update rows: Jouzu first, then the launcher that carries them. */
 const labels: Record<Locale, {
@@ -11,6 +13,7 @@ const labels: Record<Locale, {
   available: string; availableTag: string; upToDate: string; updateJouzu: string; updateLauncher: string;
   checking: string; downloading: string; installing: string; updated: string;
   checkFailed: string; retry: string; restart: string; cancel: string; unavailable: string;
+  channel: string; stable: string; qa: string; qaHint: string; back: string;
 }> = {
   en: {
     title: 'System', description: 'Jouzu, the launcher, and the tools they need.', check: 'Check for updates',
@@ -20,6 +23,7 @@ const labels: Record<Locale, {
     checkFailed: 'Could not check for updates', retry: 'Retry',
     restart: 'The launcher restarts after updating.', cancel: 'Cancel',
     unavailable: 'Online updates are unavailable for this version.',
+    channel: 'Update channel', stable: 'Stable', qa: 'QA (test builds)', qaHint: 'QA updates this installation in place and keeps your data. Switch back to Stable at any time.', back: 'Back to Stable (older than this build)',
   },
   ja: {
     title: 'システム', description: 'Jouzu、ランチャー、および必要なツールの状態です。', check: '更新を確認',
@@ -29,6 +33,7 @@ const labels: Record<Locale, {
     checkFailed: '更新を確認できませんでした', retry: '再試行',
     restart: '更新後にランチャーを再起動します。', cancel: 'キャンセル',
     unavailable: 'このバージョンではオンライン更新を利用できません。',
+    channel: '更新チャネル', stable: '安定版', qa: 'QA（テスト版）', qaHint: 'QA はこのインストールをそのまま更新し、データも引き継ぎます。いつでも安定版に戻せます。', back: '安定版に戻す（このビルドより古い版）',
   },
   'zh-Hans': {
     title: '系统', description: '查看 Jouzu、启动器以及所需工具的状态。', check: '检查更新',
@@ -38,6 +43,7 @@ const labels: Record<Locale, {
     checkFailed: '暂时无法检查更新', retry: '重试',
     restart: '更新后将重新启动启动器。', cancel: '取消',
     unavailable: '此版本暂不支持在线更新。',
+    channel: '更新通道', stable: '正式版', qa: 'QA（测试版）', qaHint: 'QA 在原安装上直接升级，沿用你的数据。可随时切回正式版。', back: '切回正式版（比当前版本旧）',
   },
   'zh-Hant': {
     title: '系統', description: '查看 Jouzu、啟動器以及所需工具的狀態。', check: '檢查更新',
@@ -47,6 +53,7 @@ const labels: Record<Locale, {
     checkFailed: '暫時無法檢查更新', retry: '重試',
     restart: '更新後將重新啟動啟動器。', cancel: '取消',
     unavailable: '此版本暫不支援線上更新。',
+    channel: '更新通道', stable: '正式版', qa: 'QA（測試版）', qaHint: 'QA 在原安裝上直接升級，沿用你的資料。可隨時切回正式版。', back: '切回正式版（比目前版本舊）',
   },
 };
 
@@ -62,6 +69,8 @@ export interface UpdateViewState {
   phases: Phase[]; versions: string[]; targets: (string | null)[]; progress?: number;
   configured: boolean[]; errors: (string | null)[]; notes: string[]; sources: string[];
   check: () => void; install: (index: number) => void;
+  /** The launcher row's feed. Absent where online updates are not configured. */
+  channel?: { value: 'stable' | 'qa'; set: (value: 'stable' | 'qa') => void; downgrade: boolean };
   /** The Jouzu row offers this when the application files are not there to run. */
   repair?: { label: string; run: () => void };
 }
@@ -102,11 +111,12 @@ export function UpdatePreview({ locale, live, focusIndex }: { locale: Locale; li
       </div>
       <div className="flex flex-col gap-2">
         {!live.configured[index] && <p className="text-sm text-muted-foreground">{t.unavailable}</p>}
-        {phase === 'available' && <p className="text-sm text-muted-foreground">{t.available} {live.targets[index]}</p>}
+        {phase === 'available' && <p className="text-sm text-muted-foreground">{index === 1 && live.channel?.downgrade ? t.back : t.available} {live.targets[index]}</p>}
+        {index === 1 && live.channel && <div className="flex flex-wrap items-center gap-3"><span className="text-sm">{t.channel}</span><Select value={live.channel.value} disabled={busy} onValueChange={value => live.channel?.set(value as 'stable' | 'qa')}><SelectTrigger aria-label={t.channel} className="w-48"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="stable">{t.stable}</SelectItem><SelectItem value="qa">{t.qa}</SelectItem></SelectContent></Select>{live.channel.value === 'qa' && <p className="w-full text-xs text-muted-foreground">{t.qaHint}</p>}</div>}
         {['available', 'complete'].includes(phase) && (live.notes[index]
           ? <div className="max-h-40 overflow-auto rounded-md bg-muted/40 p-2"><p className="text-xs font-medium">{noteText[locale][0]}</p><ul className="mt-1 space-y-1">{noteItems(live.notes[index])}</ul>{live.sources[index] && <p className="mt-1 text-[10px] text-muted-foreground/70">{noteText[locale][1]} {live.sources[index]}</p>}</div>
           : <p className="text-xs text-muted-foreground">{noteText[locale][2]}</p>)}
-        {phase === 'error' && <p role="alert" className="text-sm text-destructive">{live.errors[index] ?? t.checkFailed}</p>}
+        {phase === 'error' && <ErrorLine raw={live.errors[index] ?? ""} failed={t.checkFailed} />}
         {(phase === 'downloading' || phase === 'installing') && <Progress value={phase === 'downloading' ? live.progress : undefined} />}
       </div>
     </section>)}</div>
