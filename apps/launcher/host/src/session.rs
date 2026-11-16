@@ -5100,6 +5100,10 @@ impl Session {
                     "runtime.exited",
                     json!({ "code": code }),
                 );
+                // The hold on the warm pool was for this runtime attaching, and it
+                // went down with it. Kept, it would make the runtime this session
+                // starts next wait for the pool, that is, for itself, forever.
+                self.warm_attach.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take();
                 // Commands still open went down with the runtime: none of them
                 // will answer, and none of their effects can be assumed.
                 self.commands.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clear();

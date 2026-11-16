@@ -4982,6 +4982,34 @@ mod session_tests {
         manager.stop_all();
     }
 
+    /// The warm runtime a session took dies while attaching. The session's hold
+    /// on the pool ("attaching") went with that runtime: the runtime it starts
+    /// next must not wait for it, which would be waiting for itself.
+    #[tokio::test]
+    async fn a_session_whose_warm_runtime_dies_while_attaching_starts_another() {
+        let marker = tempfile::tempdir().unwrap();
+        let marker = marker.path().join("exited");
+        let (manager, _home, workspace) =
+            manager_with_env(50, &[("FAKE_RUNTIME_EXIT_ON_SWITCH_ONCE", marker.to_str().unwrap()), ("FAKE_RUNTIME_START_DELAY_MS", "300")]);
+        // Taken while still starting: no runtime has answered yet, so the pool
+        // lets one start at a time (#94).
+        let pool = manager.enable_warm_runtime().expect("warm pool");
+        assert_eq!(pool.status()["state"], "starting");
+        let path = workspace.path().join("old.jsonl");
+        let session = manager
+            .create(
+                workspace.path().to_str().unwrap(),
+                Some(path.to_string_lossy().into_owned()),
+                None,
+            )
+            .unwrap();
+        wait_until(|| marker.exists()).await;
+        wait_status(&session, Status::Idle).await;
+        session.send("old", "hello").unwrap();
+        wait_until(|| conversation(&session).last().map(String::as_str) == Some("assistant:hello")).await;
+        manager.stop_all();
+    }
+
     #[tokio::test]
     async fn a_session_takes_a_warm_runtime_that_is_still_starting() {
         let (manager, _home, workspace) =

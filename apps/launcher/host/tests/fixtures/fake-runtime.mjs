@@ -1,7 +1,7 @@
 // Fake pi RPC runtime for host tests. It speaks the real wire shapes:
 // {id,type:"response",...}, extension_ui_request, and agent/message events.
 import { spawn } from "node:child_process";
-import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import readline from "node:readline";
 
 const delay = Number(process.env.FAKE_RUNTIME_DELAY_MS ?? 15);
@@ -393,6 +393,12 @@ lines.on("line", line => {
       response(value.id, "set_thinking_level", { level: String(value.level ?? "off") });
       break;
     case "switch_session":
+      // FAKE_RUNTIME_EXIT_ON_SWITCH_ONCE names a marker file: the first runtime to
+      // be switched to a session dies there (like a profile lock failure, #94).
+      if (process.env.FAKE_RUNTIME_EXIT_ON_SWITCH_ONCE && !existsSync(process.env.FAKE_RUNTIME_EXIT_ON_SWITCH_ONCE)) {
+        writeFileSync(process.env.FAKE_RUNTIME_EXIT_ON_SWITCH_ONCE, "exited");
+        process.exit(1);
+      }
       const refusal = switchRefusal();
       if (refusal) {
         failure(value.id, "switch_session", refusal);
