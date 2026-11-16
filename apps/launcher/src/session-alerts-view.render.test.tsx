@@ -33,7 +33,7 @@ describe("steer queue", () => {
   });
 
   it("after Stop offers Continue and Discard", () => {
-    const html = renderToStaticMarkup(<SteerQueue items={[{ clientMessageId: "a", text: "first", state: "paused", images: 0 }]} onEdit={noop} onRemove={noop} onContinue={noop} onDiscard={noop} />);
+    const html = renderToStaticMarkup(<SteerQueue items={[{ clientMessageId: "a", text: "first", state: "returned", images: 0 }]} onEdit={noop} onRemove={noop} onContinue={noop} onDiscard={noop} />);
     expect(html).toContain("waiting after the stopped reply");
     expect(html).toContain("Continue");
     expect(html).toContain("Discard");
@@ -41,6 +41,12 @@ describe("steer queue", () => {
   it("shows a message Flow holds as held, with nothing that would pretend to remove it", () => {
     const html = renderToStaticMarkup(<SteerQueue items={[{ clientMessageId: "a", text: "first", state: "held", images: 0 }]} onEdit={noop} onRemove={noop} onContinue={noop} onDiscard={noop} />);
     expect(html).toContain("Held by Flow");
+    expect(html).not.toContain("Remove queued message");
+    expect(html).not.toContain("Edit queued message");
+  });
+  it("offers no edit or remove for a message the runtime already has", () => {
+    const html = renderToStaticMarkup(<SteerQueue items={[{ clientMessageId: "a", text: "first", state: "delivering", images: 0 }]} onEdit={noop} onRemove={noop} onContinue={noop} onDiscard={noop} />);
+    expect(html).toContain("first");
     expect(html).not.toContain("Remove queued message");
     expect(html).not.toContain("Edit queued message");
   });

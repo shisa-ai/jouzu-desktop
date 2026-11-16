@@ -7,7 +7,8 @@ layer has its own document and its own readers; none repeats another.
 This document covers only what the jouzu runtime provides, which of its
 behaviours the host relies on, and what we need changed in the runtime. The
 runtime talks only to the host and knows nothing about any UI. Behaviours below
-were checked against the published jouzu 0.2.6 package.
+were checked against the published jouzu 0.2.5 (the version Desktop installs)
+and 0.2.6 packages; they behave the same in both.
 
 ## Boundary
 
@@ -21,7 +22,7 @@ were checked against the published jouzu 0.2.6 package.
 
 ## Behaviours the host relies on
 
-| Topic | jouzu 0.2.6 behaviour | How the host uses it |
+| Topic | jouzu 0.2.5 / 0.2.6 behaviour | How the host uses it |
 |---|---|---|
 | A run | Starts with `agent_start`, ends with `agent_settled`; in between `turn_*`, `message_*`, `tool_execution_*`, `auto_retry_*`, `compaction_*` | A run starts and ends on these two events only, whoever started it |
 | Runs started by the runtime | Flow and extensions can start a run with no prompt from the host | The host records it as a run with `origin = runtime` |

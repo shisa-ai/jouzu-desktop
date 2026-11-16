@@ -573,20 +573,33 @@ impl RunOrigin {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RunPhase {
-    /// The prompt waits for the runtime's handshake.
+    /// The prompt waits for the runtime's handshake; the run keeps it.
     Starting,
+    /// Claimed for a message whose prompt is about to be written.
+    Claimed,
     /// The prompt was written; the runtime has not answered it yet.
     Sent,
-    /// The runtime accepted the prompt; its run is about to start.
+    /// The runtime accepted the prompt; its run is about to start. The runtime
+    /// answers a prompt before that run's `agent_start`, and after it always
+    /// ends the run with `agent_settled`.
     Accepted,
     /// Between the runtime's `agent_start` and `agent_settled`.
     Streaming,
 }
 
-/// The run in progress: the one answer to "is this session busy". The host
-/// opens it when it hands the runtime a prompt, or on the runtime's
-/// `agent_start` when the runtime started it itself; it ends on
-/// `agent_settled`, whoever started it, or when a failure ends it.
+impl RunPhase {
+    /// The runtime has (or is about to have) a run for it: only `agent_settled` ends it.
+    fn started(self) -> bool {
+        matches!(self, RunPhase::Accepted | RunPhase::Streaming)
+    }
+}
+
+/// The run in progress: the one answer to "is this session busy", and
+/// everything that belongs to that run. The host opens it when it hands the
+/// runtime a prompt, or on the runtime's `agent_start` when the runtime
+/// started it itself; it ends on `agent_settled`, whoever started it, or when
+/// a failure ends it. Every change to it happens under its lock, and every
+/// change checks that the run is still the one it means.
 #[derive(Clone)]
 struct Run {
     id: String,
@@ -596,10 +609,55 @@ struct Run {
     client_message_id: Option<String>,
     /// The client that sent that message.
     client: Option<String>,
-    /// The prompt written for that message, kept until the run starts: a run
-    /// the runtime starts first refuses it, and it goes back to the queue.
+    /// The prompt for that message and its history row, kept until the run
+    /// starts: if the runtime starts a run of its own first, the message goes
+    /// back to the queue with both.
     prompt: Option<Value>,
+    row: Option<Value>,
     started_at: String,
+    /// Stop was asked for this run.
+    stopping: bool,
+    /// Its first reply has started. The runtime takes waiting steers once more
+    /// just before its first model call, so a steer handed over earlier would
+    /// be merged into the message that started it.
+    replying: bool,
+    /// Its own prompt has not come back from the runtime yet: the first user
+    /// message of the run is that prompt, not a steered one.
+    echo_pending: bool,
+}
+
+impl Run {
+    fn user(id: &str, client_message_id: &str, client: Option<String>, prompt: Value, row: Option<Value>, phase: RunPhase) -> Self {
+        Self {
+            id: id.to_string(),
+            origin: RunOrigin::User,
+            phase,
+            client_message_id: Some(client_message_id.to_string()),
+            client,
+            prompt: Some(prompt),
+            row,
+            started_at: Session::now_iso(),
+            stopping: false,
+            replying: false,
+            echo_pending: true,
+        }
+    }
+
+    fn runtime(id: String) -> Self {
+        Self {
+            id,
+            origin: RunOrigin::Runtime,
+            phase: RunPhase::Streaming,
+            client_message_id: None,
+            client: None,
+            prompt: None,
+            row: None,
+            started_at: Session::now_iso(),
+            stopping: false,
+            replying: false,
+            echo_pending: false,
+        }
+    }
 }
 
 const STEER_ID_PREFIX: &str = "steer:";
@@ -634,10 +692,6 @@ pub struct Session {
     queued_turns: Mutex<VecDeque<Queued>>,
     /// Steered messages up to this generation are being taken back (`clear_queue`).
     steer_generation: AtomicU64,
-    /// This run's first model call has started (its first reply began). The
-    /// runtime takes waiting steers once more just before that call, so a
-    /// steer handed over earlier would be merged into the first message.
-    replying: AtomicBool,
     /// Steers written to the runtime and not answered yet. The runtime queues
     /// a steer only after its extensions' input handlers ran, handling other
     /// commands meanwhile: until it answers, a take-back would miss it.
@@ -648,19 +702,14 @@ pub struct Session {
     /// one starts on the default model; a saved one keeps the model it used,
     /// which the runtime restores when it opens the file.
     fresh: AtomicBool,
-    /// The running turn's own prompt has not come back from the runtime yet;
-    /// the first user message of a run is that prompt, not a steered one.
-    prompt_echo: AtomicBool,
     first_output_turn: Mutex<Option<String>>,
     first_output: Mutex<FirstOutput>,
     /// Held while this session attaches to a runtime from the warm pool.
     warm_attach: Mutex<Option<(crate::runtime::warm::Attaching, Instant)>>,
     queue_paused: AtomicBool,
-    pending_prompts: Mutex<Vec<Value>>,
     next_message: AtomicU64,
     next_request: AtomicU64,
     run: Mutex<Option<Run>>,
-    cancelling: AtomicBool,
     /// A model request was cut off by a runtime exit. The runtime's Flow control
     /// withholds it (and any new input) until someone decides; the host already
     /// decided (the turn failed), so recovery releases the hold before going idle.
@@ -899,19 +948,19 @@ impl Session {
     ///
     /// It follows the runtime's rule for input during a run, whoever started
     /// the run (the user or the runtime itself, such as Flow): a streaming run
-    /// takes steer, except during a provider retry or a compaction, when the
-    /// runtime does not take input; the messages then wait in the host queue
-    /// and go in once those end. Whether a message sent during a run the
-    /// runtime started should be a steer is still a product decision; changing
-    /// it changes only this function.
+    /// takes steer once its first reply has started (the runtime would put an
+    /// earlier one into the request beside the message that started the run),
+    /// not while it is being stopped, and not during a provider retry or a
+    /// compaction, when the runtime does not take input; the messages then wait
+    /// in the host queue and go in once those end. Whether a message sent
+    /// during a run the runtime started should be a steer is still a product
+    /// decision; changing it changes only this function.
     fn run_takes_steer(&self) -> bool {
-        let streaming = self.run_guard().as_ref().is_some_and(|run| run.phase == RunPhase::Streaming);
-        streaming
-            && matches!(
-                self.status(),
-                Status::Running | Status::WaitingApproval | Status::WaitingQuestion
-            )
-            && !matches!(self.step_guard().state, "retrying" | "compacting")
+        let ready = self
+            .run_guard()
+            .as_ref()
+            .is_some_and(|run| run.phase == RunPhase::Streaming && run.replying && !run.stopping);
+        ready && !matches!(self.step_guard().state, "retrying" | "compacting")
     }
 
     /// Hand every waiting message to the running turn. The runtime delivers
@@ -919,11 +968,7 @@ impl Session {
     /// before the run's first reply has started: the runtime would put it in
     /// the first request beside the message that started the run.
     fn steer_queue(&self) {
-        if !self.replying.load(Ordering::SeqCst)
-            || self.queue_paused.load(Ordering::SeqCst)
-            || self.cancelling.load(Ordering::SeqCst)
-            || !self.run_takes_steer()
-        {
+        if self.queue_paused.load(Ordering::SeqCst) || !self.run_takes_steer() {
             return;
         }
         let generation = self.steer_generation.load(Ordering::SeqCst);
@@ -989,9 +1034,11 @@ impl Session {
     /// A run ended: take back what it did not use, then start the next
     /// waiting message (at once, or from the take-back's answer).
     fn run_finished(self: &Arc<Self>) {
-        if self.reclaim_steered() || !self.start_queued_turn() {
-            self.set_status(Status::Idle);
+        if !self.reclaim_steered() {
+            self.start_queued_turn();
         }
+        self.sync_status();
+        self.publish_summary();
     }
 
     fn clear_runtime_queue(&self) {
@@ -1024,7 +1071,11 @@ impl Session {
     /// A user message the runtime put into the running turn.
     fn user_message_started(&self, message: Option<&Value>) {
         let Some(turn) = self.run_id() else { return };
-        if self.prompt_echo.swap(false, Ordering::SeqCst) {
+        let echo = self
+            .run_guard()
+            .as_mut()
+            .is_some_and(|run| std::mem::replace(&mut run.echo_pending, false));
+        if echo {
             return;
         }
         let text = message
@@ -1162,10 +1213,8 @@ impl Session {
                 }
             }
         }
-        if self.run_id().is_some() {
+        if !self.start_queued_turn() {
             self.steer_queue();
-        } else if self.status() == Status::Idle {
-            self.start_queued_turn();
         }
         self.publish_summary();
     }
@@ -2074,7 +2123,7 @@ impl Session {
     fn finish_handshake(self: &Arc<Self>) {
         self.recovery_succeeded();
         self.apply_pending_preferences();
-        self.flush_pending_prompts();
+        self.flush_parked_prompt();
         // Start the next warm runtime only now: on a busy machine a second
         // runtime booting beside this one would slow down the one the user waits for.
         if let Some(pool) = self.config.warm.get() {
@@ -2084,14 +2133,12 @@ impl Session {
             let workspace = PathBuf::from(self.runtime_cwd());
             tokio::spawn(async move { pool.aim(&workspace) });
         }
-        // A cancelled starting turn has no prompt to flush. Complete the
-        // handshake bookkeeping first, then go idle; never go idle while
-        // a run is in progress (a prompt, or a run the runtime started itself).
-        if self.run_guard().is_none() {
-            if !self.start_queued_turn() {
-                self.set_status(Status::Idle);
-            }
-        }
+        // The session is up: its status now follows its run (a prompt flushed
+        // above, a run the runtime started itself, or none), and a waiting
+        // message starts when there is none.
+        self.set_status(self.run_status());
+        self.start_queued_turn();
+        self.sync_status();
     }
 
     /// A prompt the runtime consumed without starting a run (a slash command, or
@@ -2108,22 +2155,20 @@ impl Session {
             // Only a run that has not started: once the runtime runs it, its
             // `agent_settled` ends it.
             let ours = run.as_ref().is_some_and(|run| {
-                run.client_message_id.as_deref() == Some(client_message_id) && run.phase != RunPhase::Streaming
+                run.client_message_id.as_deref() == Some(client_message_id) && !run.phase.started()
             });
             if !ours {
                 return;
             }
             run.take().map(|run| run.id)
         };
-        self.cancelling.store(false, Ordering::SeqCst);
         if let Some(turn) = turn {
-            let mut data = json!({ "turnId": turn });
+            let mut data = json!({ "turnId": turn, "clientMessageId": client_message_id });
             if let (Some(data), Some(outcome)) = (data.as_object_mut(), outcome.as_object()) {
                 data.extend(outcome.clone());
             }
             self.publish("turn.end", data);
         }
-        self.prompt_echo.store(false, Ordering::SeqCst);
         self.run_finished();
         self.publish_summary();
     }
@@ -2337,7 +2382,12 @@ impl Session {
                     return;
                 }
                 let assistant = role == Some("assistant");
-                if assistant && !self.replying.swap(true, Ordering::SeqCst) {
+                let first_reply = assistant
+                    && self
+                        .run_guard()
+                        .as_mut()
+                        .is_some_and(|run| !std::mem::replace(&mut run.replying, true));
+                if first_reply {
                     self.steer_queue();
                 }
                 if assistant && self.run_id().is_some() {
@@ -2749,7 +2799,7 @@ impl Session {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(approval_id.clone(), entry);
-        self.set_status(Status::WaitingApproval);
+        self.sync_status();
         self.publish("approval.requested", data);
         self.schedule_approval_expiry(approval_id, timeout);
     }
@@ -2821,13 +2871,17 @@ impl Session {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(question_id.clone(), entry);
-        self.set_status(Status::WaitingQuestion);
+        self.sync_status();
         self.publish("question.requested", data);
         self.schedule_question_expiry(question_id, timeout);
     }
 
     fn run_guard(&self) -> std::sync::MutexGuard<'_, Option<Run>> {
         self.run.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn queue_guard(&self) -> std::sync::MutexGuard<'_, VecDeque<Queued>> {
+        self.queued_turns.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// The run in progress, if any.
@@ -2845,30 +2899,55 @@ impl Session {
         self.run_guard().as_ref().and_then(|run| run.client_message_id.clone())
     }
 
-    /// The prompt of the run in progress has reached the runtime: it is no
-    /// longer only parked for the handshake.
+    /// The prompt of the run in progress has reached the runtime.
     fn run_reached_runtime(&self) -> bool {
-        self.run_guard().as_ref().is_some_and(|run| run.phase != RunPhase::Starting)
+        self.run_guard()
+            .as_ref()
+            .is_some_and(|run| !matches!(run.phase, RunPhase::Starting | RunPhase::Claimed))
     }
 
     fn take_run(&self) -> Option<Run> {
         self.run_guard().take()
     }
 
-    /// Open a run for a user's message, before its prompt is written. What the
-    /// previous run streamed is not part of it.
-    fn open_user_run(&self, id: &str, client_message_id: &str, client: Option<String>, prompt: Value, phase: RunPhase) {
-        *self.run_guard() = Some(Run {
-            id: id.to_string(),
-            origin: RunOrigin::User,
-            phase,
-            client_message_id: Some(client_message_id.to_string()),
-            client,
-            prompt: Some(prompt),
-            started_at: Self::now_iso(),
-        });
-        self.clear_reply();
-        self.prompt_echo.store(true, Ordering::SeqCst);
+    /// Whether a new run may start for a message: none is in progress, and no
+    /// prompt of ours is still with the runtime unanswered (it may yet start one).
+    fn free_for_run(run: &Option<Run>, queue: &VecDeque<Queued>) -> bool {
+        run.is_none() && !queue.iter().any(|item| item.prompted)
+    }
+
+    /// The session's status while it is up, from its run and what it waits on.
+    fn run_status(&self) -> Status {
+        if !self
+            .pending_approvals
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_empty()
+        {
+            Status::WaitingApproval
+        } else if !self
+            .pending_questions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_empty()
+        {
+            Status::WaitingQuestion
+        } else if self.run_guard().is_some() {
+            Status::Running
+        } else {
+            Status::Idle
+        }
+    }
+
+    /// Bring running/idle in line with the run. Starting, recovering, stopped
+    /// and failed sessions keep their status: their own paths end those.
+    fn sync_status(&self) {
+        if matches!(
+            self.status(),
+            Status::Idle | Status::Running | Status::WaitingApproval | Status::WaitingQuestion
+        ) {
+            self.set_status(self.run_status());
+        }
     }
 
     fn clear_reply(&self) {
@@ -2883,15 +2962,56 @@ impl Session {
         self.reset_step();
     }
 
-    /// The prompt of the run in progress was written to the runtime.
-    fn run_sent(&self) {
-        if let Some(run) = self.run_guard().as_mut().filter(|run| run.phase == RunPhase::Starting) {
-            run.phase = RunPhase::Sent;
+    /// A user row as history keeps it once the runtime has the message.
+    fn stamped_row(mut row: Value, turn: &str) -> Value {
+        if let Some(object) = row.as_object_mut() {
+            object.insert("turnId".to_string(), json!(turn));
+            object.insert("createdAt".to_string(), json!(Self::now_iso()));
         }
+        row
     }
 
-    /// The runtime accepted the prompt of the run in progress. It answers before
-    /// that run's `agent_start`, so a run that starts before this answer is not it.
+    /// Take the user row of `turn` out of history when it is the newest row
+    /// (the message was displaced before anything followed it). Clients reload.
+    fn take_user_row(&self, turn: &str) -> Option<Value> {
+        let row = {
+            let mut history = self.history.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let last = history.last()?;
+            if last.get("id").and_then(Value::as_str) != Some(&format!("{turn}:user")) {
+                return None;
+            }
+            history.pop()
+        };
+        self.publish("session.history", json!({ "rows": self.history.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).len() }));
+        row.map(|mut row| {
+            if let Some(object) = row.as_object_mut() {
+                object.remove("cursor");
+                object.remove("turn");
+            }
+            row
+        })
+    }
+
+    /// Write the prompt of the run `id`, if that run is still the one in
+    /// progress and its prompt was not written yet. Checked and written under
+    /// the run's lock, so a run the runtime starts meanwhile cannot get it too.
+    /// Returns whether it was written.
+    fn write_prompt(&self, id: &str) -> Result<bool, ApiError> {
+        let mut run = self.run_guard();
+        let Some(current) = run.as_mut().filter(|run| {
+            run.id == id && matches!(run.phase, RunPhase::Claimed | RunPhase::Starting)
+        }) else {
+            return Ok(false);
+        };
+        let Some(prompt) = current.prompt.clone() else {
+            return Ok(false);
+        };
+        current.phase = RunPhase::Sent;
+        // write_command takes no run state: holding the lock is safe.
+        self.write_command(prompt).map(|_| true)
+    }
+
+    /// The runtime accepted the prompt of the run in progress.
     fn run_accepted(&self, client_message_id: &str) {
         if let Some(run) = self.run_guard().as_mut().filter(|run| {
             run.phase == RunPhase::Sent && run.client_message_id.as_deref() == Some(client_message_id)
@@ -2903,181 +3023,251 @@ impl Session {
     /// The runtime started a run (`agent_start`): the one the host's accepted
     /// prompt asked for, or one of its own (Flow, an extension).
     fn run_started(self: &Arc<Self>) {
-        // Waiting messages go in once the first reply starts.
-        self.replying.store(false, Ordering::SeqCst);
-        let displaced = {
+        enum Started {
+            Ours { stop: bool },
+            Own { displaced: Option<Run>, id: String },
+        }
+        let started = {
             let mut run = self.run_guard();
             match run.as_mut() {
-                Some(current) if matches!(current.phase, RunPhase::Accepted | RunPhase::Streaming) => {
+                Some(current) if current.phase.started() => {
                     current.phase = RunPhase::Streaming;
+                    current.replying = false;
                     current.prompt = None;
-                    None
+                    current.row = None;
+                    Started::Ours { stop: current.stopping }
                 }
-                _ => Some(run.take()),
+                _ => {
+                    let counter = self.next_message.fetch_add(1, Ordering::Relaxed) + 1;
+                    let id = format!("m-{counter}");
+                    let displaced = run.replace(Run::runtime(id.clone()));
+                    Started::Own { displaced, id }
+                }
             }
         };
-        match displaced {
-            None => {
-                self.set_status(Status::Running);
+        match started {
+            Started::Ours { stop } => {
                 // The runtime runs its input handlers before the agent run exists,
                 // and an abort that lands then finds nothing to stop. The host
                 // already answered that Stop with "cancelling", so it stops this run.
-                if self.cancelling.load(Ordering::SeqCst) {
+                if stop {
                     let id = self.request_id();
                     // A failed write means the runtime is gone; its exit ends the run.
                     let _ = self.write_command(pi::command::with_id(pi::command::abort(), &id));
                 }
             }
-            Some(mine) => {
-                if let Some(mine) = mine {
+            Started::Own { displaced, id } => {
+                if let Some(mine) = displaced {
                     self.displace_prompt(mine);
                 }
-                self.open_runtime_run();
+                self.clear_reply();
+                log(&self.home, "info", "run.runtime_started", json!({ "session": self.id, "turnId": id }));
+                self.publish("turn.start", json!({ "turnId": id, "phase": "running", "origin": "runtime" }));
             }
         }
+        self.sync_status();
         self.publish_summary();
     }
 
-    /// The runtime started a run of its own while the user's prompt waited for
-    /// it. That prompt did not start this run: it waits in the queue, and the
-    /// runtime either refuses it (it is then steered into this run) or, if this
-    /// run ends first, starts a run with it.
+    /// The runtime started a run of its own before it took the user's prompt.
+    /// That prompt did not start this run: the message goes back to the front
+    /// of the queue with its row. Written already, the runtime will refuse it
+    /// (it is then steered into this run) or, if this run ends first, start a
+    /// run with it (`displaced_prompt_answered`). Not written yet, it is never
+    /// written as a prompt now.
     fn displace_prompt(&self, mine: Run) {
         let Some(prompt) = mine.prompt else { return };
         let client = mine.client_message_id.clone().unwrap_or_default();
-        // Still parked for the handshake: it never reached the runtime.
-        let prompted = mine.phase != RunPhase::Starting;
-        if !prompted {
-            self.pending_prompts
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .retain(|parked| parked.get("id").and_then(Value::as_str) != Some(client.as_str()));
-        }
-        if self.cancelling.swap(false, Ordering::SeqCst) {
-            // Stop was pressed for this message: it does not run.
-            self.tombstone(&client);
-        }
+        let prompted = mine.phase == RunPhase::Sent;
+        let row = self.take_user_row(&mine.id).or(mine.row);
         log(
             &self.home,
             "info",
             "run.prompt_displaced",
-            json!({ "session": self.id, "turnId": mine.id, "clientMessageId": client, "prompted": prompted }),
+            json!({ "session": self.id, "turnId": mine.id, "clientMessageId": client, "prompted": prompted, "stopped": mine.stopping }),
         );
-        self.prompt_echo.store(false, Ordering::SeqCst);
-        self.queued_turns
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .push_front(Queued {
-                turn: mine.id.clone(),
-                prompt,
-                // Its row is in history already.
-                row: None,
-                steered: None,
-                no_steer: false,
-                held: false,
-                prompted,
-            });
-        self.publish("turn.end", json!({ "turnId": mine.id, "status": "queued" }));
-    }
-
-    /// A run the runtime started itself: it is the session's run like any other.
-    fn open_runtime_run(&self) {
-        let counter = self.next_message.fetch_add(1, Ordering::Relaxed) + 1;
-        let id = format!("m-{counter}");
-        *self.run_guard() = Some(Run {
-            id: id.clone(),
-            origin: RunOrigin::Runtime,
-            phase: RunPhase::Streaming,
-            client_message_id: None,
-            client: None,
-            prompt: None,
-            started_at: Self::now_iso(),
+        self.publish("turn.end", json!({ "turnId": mine.id, "clientMessageId": client, "status": "queued" }));
+        if mine.stopping {
+            // Stop was asked for this message: it does not run. A prompt the
+            // runtime still has is dropped when it answers.
+            self.tombstone(&client);
+            if !prompted {
+                return;
+            }
+        }
+        self.queue_guard().push_front(Queued {
+            turn: mine.id,
+            prompt,
+            row,
+            steered: None,
+            no_steer: false,
+            held: false,
+            prompted,
         });
-        self.clear_reply();
-        self.prompt_echo.store(false, Ordering::SeqCst);
-        log(&self.home, "info", "run.runtime_started", json!({ "session": self.id, "turnId": id }));
-        self.publish("turn.start", json!({ "turnId": id, "phase": "running", "origin": "runtime" }));
-        self.set_status(Status::Running);
     }
 
-    /// The runtime's run ended (`agent_settled`), whoever started it.
+    /// The runtime's run ended (`agent_settled`), whoever started it. A prompt
+    /// still waiting for its answer is not what ended.
     fn run_settled(self: &Arc<Self>, aborted: bool) {
-        // A prompt still waiting for its own run is not what ended.
-        let ended = self.run().filter(|run| run.phase == RunPhase::Streaming);
+        let ended = {
+            let mut run = self.run_guard();
+            if run.as_ref().is_some_and(|run| run.phase.started()) {
+                run.take()
+            } else {
+                None
+            }
+        };
         if let Some(run) = ended {
             let stop_reason = if aborted { "interrupted" } else { "completed" };
             // Whatever the last step had not finished writing is its reply.
             self.finish_step_reply(&run.id, None, aborted);
             self.close_unfinished_tools();
-            // Still the run while its end is told, so the end names its message.
-            self.publish("turn.end", json!({ "turnId": run.id, "status": stop_reason }));
-            self.take_run();
+            self.publish(
+                "turn.end",
+                json!({ "turnId": run.id, "clientMessageId": run.client_message_id, "status": stop_reason }),
+            );
+            self.cancel_pending("turn-ended");
+            // Steered messages the run did not reach are taken back before
+            // anything else is sent, so the runtime cannot use them twice.
+            self.run_finished();
         }
-        self.cancel_pending("turn-ended");
-        if self.run_guard().is_some() {
-            self.publish_summary();
-            return;
-        }
-        self.cancelling.store(false, Ordering::SeqCst);
-        self.prompt_echo.store(false, Ordering::SeqCst);
-        // Steered messages the run did not reach are taken back before
-        // anything else is sent, so the runtime cannot use them twice.
-        self.run_finished();
+        self.sync_status();
         self.publish_summary();
     }
 
     /// The runtime answered a prompt a run of its own displaced (see
     /// `displace_prompt`). Returns whether the answer was for one.
     fn displaced_prompt_answered(self: &Arc<Self>, client_message_id: &str, value: &Value) -> bool {
+        enum Answer {
+            Steer,
+            Dropped,
+            Done(Option<Value>),
+            Held,
+            Started { turn: String, row: Option<Value> },
+            Overlap,
+        }
         let success = value.get("success").and_then(Value::as_bool) == Some(true);
         let disposition = value.pointer("/data/disposition").and_then(Value::as_str);
         let stopped = self.tombstoned(client_message_id);
-        let item = {
-            let mut queue = self
-                .queued_turns
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let answer = {
+            let mut queue = self.queue_guard();
             let Some(at) = queue
                 .iter()
                 .position(|item| item.prompted && item.client_message_id() == Some(client_message_id))
             else {
                 return false;
             };
-            if success || stopped {
-                queue.remove(at)
+            if !success {
+                if stopped {
+                    queue.remove(at);
+                    Answer::Dropped
+                } else {
+                    // Refused while the runtime's own run streams: it is steered into it.
+                    queue[at].prompted = false;
+                    Answer::Steer
+                }
+            } else if disposition == Some("handled") {
+                if queue[at].text().starts_with('/') {
+                    // An extension command answered in place: it is done.
+                    Answer::Done(queue.remove(at).and_then(|item| item.row))
+                } else {
+                    // Flow took it and holds it; it delivers it later itself.
+                    queue[at].prompted = false;
+                    queue[at].held = true;
+                    Answer::Held
+                }
             } else {
-                // Refused while the runtime's own run streams: it is steered into it.
-                queue[at].prompted = false;
-                None
+                // The runtime's run ended before it took the prompt: it starts a run with it.
+                let mut run = self.run_guard();
+                if run.is_some() {
+                    queue.remove(at);
+                    Answer::Overlap
+                } else {
+                    let item = queue.remove(at).expect("position is in the queue");
+                    let row = item.row.map(|row| Self::stamped_row(row, &item.turn));
+                    let mut opened = Run::user(&item.turn, client_message_id, None, item.prompt, None, RunPhase::Accepted);
+                    opened.stopping = stopped;
+                    *run = Some(opened);
+                    if let Some(row) = row.clone() {
+                        self.push_history(row);
+                    }
+                    Answer::Started { turn: item.turn, row }
+                }
             }
         };
         log(
             &self.home,
-            "info",
-            "run.displaced_answered",
+            if matches!(answer, Answer::Overlap) { "warn" } else { "info" },
+            if matches!(answer, Answer::Overlap) { "run.overlap" } else { "run.displaced_answered" },
             json!({ "session": self.id, "clientMessageId": client_message_id, "success": success, "disposition": disposition, "stopped": stopped }),
         );
-        match item {
-            Some(item) if success && disposition != Some("handled") => {
-                // The runtime's run ended before it took the prompt: it runs it now.
-                let busy = self.run_guard().is_some();
-                if busy {
-                    log(&self.home, "warn", "run.overlap", json!({ "session": self.id, "clientMessageId": client_message_id }));
-                }
-                self.open_user_run(&item.turn, client_message_id, None, item.prompt, RunPhase::Accepted);
-                // Stop was pressed for it: stop the run it starts.
-                self.cancelling.store(stopped, Ordering::SeqCst);
-                self.publish("turn.start", json!({ "turnId": item.turn, "phase": "running" }));
-                self.set_status(Status::Running);
+        match answer {
+            Answer::Steer => self.steer_queue(),
+            Answer::Done(Some(row)) => {
+                let turn = self.run_id().unwrap_or_default();
+                self.deliver_user_row(row, &turn);
             }
-            Some(_) => {}
-            None => self.steer_queue(),
+            Answer::Started { turn, row } => {
+                self.clear_reply();
+                if let Some(row) = row {
+                    self.publish("message.user", row);
+                }
+                self.publish("turn.start", json!({ "turnId": turn, "phase": "running" }));
+            }
+            Answer::Dropped | Answer::Done(None) | Answer::Held | Answer::Overlap => {}
         }
-        if self.run_guard().is_none() && self.status() == Status::Idle {
-            self.start_queued_turn();
-        }
+        self.start_queued_turn();
+        self.sync_status();
         self.publish_summary();
         true
+    }
+
+    /// Stop the run in progress, whoever started it. The host decides how:
+    /// a prompt still parked for the handshake is removed; anything else is
+    /// aborted, and a run that only starts after this is aborted when it does.
+    pub fn interrupt(&self) -> Result<Value, ApiError> {
+        if !self.queue_guard().is_empty() {
+            self.queue_paused.store(true, Ordering::SeqCst);
+        }
+        enum Stop {
+            Nothing,
+            Parked(Run),
+            Abort,
+        }
+        let stop = {
+            let mut run = self.run_guard();
+            match run.as_mut() {
+                None => Stop::Nothing,
+                Some(current) if current.phase == RunPhase::Starting => Stop::Parked(run.take().expect("checked")),
+                Some(current) => {
+                    current.stopping = true;
+                    Stop::Abort
+                }
+            }
+        };
+        match stop {
+            Stop::Nothing => {
+                self.publish_summary();
+                Ok(json!({ "status": "idle" }))
+            }
+            Stop::Parked(parked) => {
+                // Nothing in the runtime to abort yet. The handshake still
+                // completes (preferences, recovery bookkeeping) and then goes idle.
+                let client = parked.client_message_id.clone().unwrap_or_default();
+                self.publish(
+                    "turn.end",
+                    json!({ "turnId": parked.id, "clientMessageId": client, "aborted": true, "phase": "starting" }),
+                );
+                self.publish_summary();
+                Ok(json!({ "status": "cancelled" }))
+            }
+            Stop::Abort => {
+                self.publish_summary();
+                let id = self.request_id();
+                self.write_command(pi::command::with_id(pi::command::abort(), &id))?;
+                Ok(json!({ "status": "cancelling" }))
+            }
+        }
     }
 
     fn tombstone(&self, client_message_id: &str) {
@@ -3131,7 +3321,7 @@ impl Session {
         data["answeredBy"] = Value::Null;
         let _ = self.write_command(pi::command::ui_cancelled(&entry.pi_id));
         self.publish("approval.resolved", data);
-        self.restore_running_status();
+        self.sync_status();
     }
 
     fn expire_question(&self, question_id: &str) {
@@ -3150,15 +3340,7 @@ impl Session {
             "question.cancelled",
             json!({ "questionId": question_id, "reason": "expired" }),
         );
-        self.restore_running_status();
-    }
-
-    fn restore_running_status(&self) {
-        if self.run_id().is_some() {
-            self.set_status(Status::Running);
-        } else {
-            self.set_status(Status::Idle);
-        }
+        self.sync_status();
     }
 
     pub fn has_approval(&self, approval_id: &str) -> bool {
@@ -3291,7 +3473,7 @@ impl Session {
         data["decision"] = Value::String(decision.to_string());
         data["answeredBy"] = Value::String(client_id.to_string());
         self.publish("approval.resolved", data);
-        self.restore_running_status();
+        self.sync_status();
         Ok(json!({
             "approvalId": approval_id,
             "state": state,
@@ -3360,7 +3542,7 @@ impl Session {
                 "answeredBy": client_id,
             }),
         );
-        self.restore_running_status();
+        self.sync_status();
         Ok(json!({
             "questionId": question_id,
             "state": "answered",
@@ -3555,56 +3737,51 @@ impl Session {
             .map(|attachment| (attachment.mime_type.as_str(), attachment.data.as_str()))
             .collect();
         let prompt = pi::command::with_id(pi::command::prompt(text, &images), client_message_id);
+        *self
+            .failed_turn
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        let stored_attachments = self.store_attachments(attachments)?;
+        let mut row = json!({
+            "kind": "user",
+            "id": format!("{message_id}:user"),
+            "turnId": message_id,
+            "clientMessageId": client_message_id,
+            "text": text,
+            "blocks": [{ "type": "text", "text": text }],
+        });
+        if !stored_attachments.is_empty() {
+            row["attachments"] = json!(stored_attachments);
+        }
+        self.remember_turn(text);
+        // Whether the runtime is still being started: the prompt is parked
+        // until its handshake ends (`flush_parked_prompt`).
+        let starting = matches!(self.status(), Status::Pending | Status::Starting);
         // The message starts a run only when none is in progress, whoever
-        // started that one; checked and claimed at once.
-        let opened = {
+        // started that one. Decided and claimed at once, under the same locks
+        // a run's end takes, so a message never waits behind a run that ended.
+        let claimed = {
+            let mut queue = self.queue_guard();
             let mut run = self.run_guard();
-            if run.is_some() {
-                false
-            } else {
-                *run = Some(Run {
-                    id: message_id.clone(),
-                    origin: RunOrigin::User,
-                    phase: RunPhase::Starting,
-                    client_message_id: Some(client_message_id.to_string()),
-                    client: client_id.map(str::to_string),
-                    prompt: Some(prompt.clone()),
-                    started_at: Self::now_iso(),
-                });
+            if Self::free_for_run(&run, &queue) {
+                let row = Self::stamped_row(row, &message_id);
+                self.push_history(row.clone());
+                let phase = if starting { RunPhase::Starting } else { RunPhase::Claimed };
+                *run = Some(Run::user(
+                    &message_id,
+                    client_message_id,
+                    client_id.map(str::to_string),
+                    prompt,
+                    Some(row),
+                    phase,
+                ));
                 true
-            }
-        };
-        if !opened {
-            *self
-                .failed_turn
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
-            // A run is already starting/running, whoever started it. The host owns
-            // the message, not the composer: it waits in the queue (shown above the
-            // composer) and is handed to the run as steer when the run takes it
-            // (`run_takes_steer`). It joins the transcript when the runtime uses
-            // it, or starts the next run if this one ends first.
-            let stored_attachments = self.store_attachments(attachments)?;
-            let mut row = json!({
-                "kind": "user",
-                "id": format!("{message_id}:user"),
-                "turnId": message_id,
-                "clientMessageId": client_message_id,
-                "text": text,
-                "blocks": [{ "type": "text", "text": text }],
-            });
-            if !stored_attachments.is_empty() {
-                row["attachments"] = json!(stored_attachments);
-            }
-            self.remember_turn(text);
-            self.publish(
-                "message.accepted",
-                json!({ "messageId": message_id.clone(), "receipt": "queued", "waiting": true, "clientMessageId": client_message_id }),
-            );
-            self.queued_turns
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .push_back(Queued {
+            } else {
+                // A run is in progress, whoever started it. The host owns the
+                // message, not the composer: it waits in the queue and is handed
+                // to the run as steer when the run takes it (`run_takes_steer`),
+                // or starts the next run if this one ends first.
+                queue.push_back(Queued {
                     turn: message_id.clone(),
                     prompt,
                     row: Some(row),
@@ -3613,6 +3790,14 @@ impl Session {
                     held: false,
                     prompted: false,
                 });
+                false
+            }
+        };
+        if !claimed {
+            self.publish(
+                "message.accepted",
+                json!({ "messageId": message_id.clone(), "receipt": "queued", "waiting": true, "clientMessageId": client_message_id }),
+            );
             messages.insert(
                 client_message_id.to_string(),
                 SentMessage {
@@ -3625,32 +3810,7 @@ impl Session {
             self.publish_summary();
             return Ok(json!({ "messageId": message_id, "receipt": "queued", "waiting": true }));
         }
-        *self
-            .failed_turn
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
         self.clear_reply();
-        self.prompt_echo.store(true, Ordering::SeqCst);
-        let stored_attachments = match self.store_attachments(attachments) {
-            Ok(stored) => stored,
-            Err(error) => {
-                self.take_run();
-                return Err(error);
-            }
-        };
-        let mut history_row = json!({
-            "kind": "user",
-            "id": format!("{message_id}:user"),
-            "turnId": message_id,
-            "text": text,
-            "blocks": [{ "type": "text", "text": text }],
-            "createdAt": Self::now_iso(),
-        });
-        if !stored_attachments.is_empty() {
-            history_row["attachments"] = json!(stored_attachments);
-        }
-        self.push_history(history_row);
-        self.remember_turn(text);
         if let Some(path) = self
             .session_path
             .lock()
@@ -3673,11 +3833,6 @@ impl Session {
             "message.accepted",
             json!({ "messageId": message_id.clone(), "receipt": "queued" }),
         );
-        // Running only once the runtime has the session, as the summary says.
-        let starting = matches!(
-            self.status(),
-            Status::Pending | Status::Starting | Status::Recovering
-        );
         self.publish(
             "turn.start",
             json!({
@@ -3685,6 +3840,7 @@ impl Session {
                 "phase": if starting { "starting" } else { "running" },
             }),
         );
+        self.sync_status();
         self.publish_summary();
         if matches!(self.status(), Status::Pending) {
             self.set_status(Status::Starting);
@@ -3700,20 +3856,22 @@ impl Session {
                 ));
             }
         }
-        if matches!(self.status(), Status::Starting | Status::Recovering) {
-            self.pending_prompts
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .push(prompt);
-        } else {
-            self.run_sent();
-            self.set_status(Status::Running);
-            let result = self.write_command(prompt);
-            if let Err(error) = result {
-                self.fail(error.code, &error.message, error.retryable);
-                messages.remove(client_message_id);
-                return Err(error);
+        // Once the runtime is up, the prompt goes out now. While it starts, its
+        // handshake writes it; a handshake that ended since `starting` was read
+        // has already looked, so it is written here (at most once either way).
+        let mut waiting = false;
+        if !matches!(self.status(), Status::Starting | Status::Recovering) {
+            match self.write_prompt(&message_id) {
+                // A run the runtime started took its place: the message waits in the queue.
+                Ok(written) => waiting = !written && self.run_id().as_deref() != Some(message_id.as_str()),
+                Err(error) => {
+                    self.fail(error.code, &error.message, error.retryable);
+                    messages.remove(client_message_id);
+                    return Err(error);
+                }
             }
+            self.sync_status();
+            self.publish_summary();
         }
         messages.insert(
             client_message_id.to_string(),
@@ -3723,25 +3881,17 @@ impl Session {
             },
         );
         drop(messages);
-        Ok(json!({ "messageId": message_id, "receipt": "queued" }))
+        if waiting {
+            Ok(json!({ "messageId": message_id, "receipt": "queued", "waiting": true }))
+        } else {
+            Ok(json!({ "messageId": message_id, "receipt": "queued" }))
+        }
     }
 
     pub fn cancel_message(&self, client_message_id: &str) -> Result<Value, ApiError> {
         if self.run_client_message().as_deref() == Some(client_message_id) {
-            match self.status() {
-                Status::Running | Status::WaitingApproval | Status::WaitingQuestion => {
-                    self.cancelling.store(true, Ordering::SeqCst);
-                    self.interrupt()?;
-                    self.publish_summary();
-                    return Ok(json!({ "status": "cancelling" }));
-                }
-                Status::Starting | Status::Recovering => {
-                    self.interrupt()?;
-                    self.publish_summary();
-                    return Ok(json!({ "status": "cancelled" }));
-                }
-                _ => {}
-            }
+            // The message is the run in progress: cancelling it is a Stop.
+            return self.interrupt();
         }
         let removed = {
             let mut queue = self
@@ -3796,12 +3946,10 @@ impl Session {
         // Do not write a queued prompt until the replacement runtime has completed
         // its handshake. A Recovering session starts the queue from the handshake
         // path, not from this command.
-        let started = if self.status() == Status::Idle && self.run_id().is_none() {
-            self.start_queued_turn()
-        } else {
+        let started = self.start_queued_turn();
+        if !started {
             self.steer_queue();
-            false
-        };
+        }
         self.publish_summary();
         Ok(json!({ "status": if started { "running" } else { "queued" } }))
     }
@@ -3838,66 +3986,30 @@ impl Session {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .push_front(Queued { turn, prompt, row: None, steered: None, no_steer: true, held: false, prompted: false });
         self.queue_paused.store(false, Ordering::SeqCst);
-        if self.run_id().is_none() {
-            self.start_queued_turn();
-        }
+        self.start_queued_turn();
         self.publish_summary();
         Ok(json!({ "status": "retrying" }))
     }
 
     pub fn discard_queue(&self) -> Result<Value, ApiError> {
         self.reclaim_steered();
-        self.queued_turns
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clear();
+        let prompted: Vec<String> = {
+            let mut queue = self.queue_guard();
+            let prompted = queue
+                .iter()
+                .filter(|item| item.prompted)
+                .filter_map(|item| item.client_message_id().map(str::to_string))
+                .collect();
+            queue.clear();
+            prompted
+        };
+        // The runtime still has these as prompts: dropped when it answers.
+        for client_message_id in prompted {
+            self.tombstone(&client_message_id);
+        }
         self.queue_paused.store(false, Ordering::SeqCst);
         self.publish_summary();
         Ok(json!({ "status": "discarded" }))
-    }
-
-    pub fn interrupt(&self) -> Result<(), ApiError> {
-        if !self
-            .queued_turns
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .is_empty()
-        {
-            self.queue_paused.store(true, Ordering::SeqCst);
-            self.publish_summary();
-        }
-        // A pending turn can still be parked before the runtime handshake. There is
-        // nothing in the runtime to abort yet, so remove the queued prompt and end
-        // the turn here; otherwise a Stop during `starting` is a no-op.
-        if matches!(self.status(), Status::Starting | Status::Recovering) {
-            let removed = self
-                .pending_prompts
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .drain(..)
-                .count();
-            if removed > 0 {
-                let turn = {
-                    let mut run = self.run_guard();
-                    if run.as_ref().is_some_and(|run| run.phase == RunPhase::Starting) {
-                        run.take().map(|run| run.id)
-                    } else {
-                        None
-                    }
-                }
-                .unwrap_or_default();
-                self.publish(
-                    "turn.end",
-                    json!({ "turnId": turn, "aborted": true, "phase": "starting" }),
-                );
-                // Keep Starting until the handshake completes so preferences and
-                // recovery bookkeeping still run. The handshake path moves to Idle
-                // once it sees no active turn.
-                return Ok(());
-            }
-        }
-        let id = self.request_id();
-        self.write_command(pi::command::with_id(pi::command::abort(), &id))
     }
 
     pub async fn request(&self, mut command: Value, timeout: Duration) -> Result<Value, ApiError> {
@@ -4303,7 +4415,7 @@ impl Session {
             // Busy while a run is in progress, whoever started it (also while
             // it waits for an approval or an answer).
             "running": self.run_guard().is_some(),
-            "activeTurn": self.active_turn_view(self.status()),
+            "activeTurn": self.active_turn_view(),
             "runtimePid": self.runtime_pid(),
             "model": self
                 .model
@@ -4320,16 +4432,14 @@ impl Session {
     }
 
     /// The turn in progress, as the session list and the session detail both show it.
-    fn active_turn_view(&self, status: Status) -> Option<Value> {
+    fn active_turn_view(&self) -> Option<Value> {
         self.run().map(|run| {
-            let phase = if self.cancelling.load(Ordering::Relaxed) {
+            let phase = if run.stopping {
                 "cancelling"
+            } else if run.phase == RunPhase::Starting {
+                "starting"
             } else {
-                match status {
-                    Status::Pending | Status::Starting | Status::Recovering => "starting",
-                    Status::Running | Status::WaitingApproval | Status::WaitingQuestion => "running",
-                    _ => "accepted",
-                }
+                "running"
             };
             json!({
                 "turnId": run.id,
@@ -4344,7 +4454,7 @@ impl Session {
 
     pub fn summary(&self) -> Value {
         let status = self.status();
-        let active_turn = self.active_turn_view(status);
+        let active_turn = self.active_turn_view();
         let queue: Vec<Value> = self
             .queued_turns
             .lock()
@@ -4356,7 +4466,7 @@ impl Session {
                     "clientMessageId": item.client_message_id(),
                     "text": item.text(),
                     "images": item.prompt.get("images").and_then(Value::as_array).map_or(0, Vec::len),
-                    "state": if item.prompted { "delivering" } else if item.held { "held" } else if self.queue_paused.load(Ordering::Relaxed) { "paused" } else { "queued" },
+                    "state": if item.prompted { "delivering" } else if item.held { "held" } else if self.queue_paused.load(Ordering::Relaxed) { "returned" } else { "queued" },
                 })
             })
             .collect();
@@ -4449,18 +4559,14 @@ impl Session {
             messages: Mutex::new(HashMap::new()),
             queued_turns: Mutex::new(VecDeque::new()),
             steer_generation: AtomicU64::new(0),
-            replying: AtomicBool::new(false),
             steers_in_flight: AtomicUsize::new(0),
             reclaim_waiting: AtomicBool::new(false),
             fresh: AtomicBool::new(false),
-            prompt_echo: AtomicBool::new(false),
             queue_paused: AtomicBool::new(false),
             first_output_turn: Mutex::new(None),
-            pending_prompts: Mutex::new(Vec::new()),
             next_message: AtomicU64::new(0),
             next_request: AtomicU64::new(0),
             run: Mutex::new(None),
-            cancelling: AtomicBool::new(false),
             release_flow_hold: AtomicBool::new(false),
             commands: Mutex::new(Vec::new()),
             cancelled: Mutex::new(HashMap::new()),
@@ -4798,10 +4904,6 @@ impl Session {
             "error",
             json!({ "code": code, "message": message, "retryable": retryable }),
         );
-        self.pending_prompts
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clear();
         self.queue_paused.store(true, Ordering::SeqCst);
         self.steers_in_flight.store(0, Ordering::SeqCst);
         for item in self
@@ -4836,20 +4938,19 @@ impl Session {
     /// End the turn in progress, whatever stage it reached, without a run
     /// ending it. A reply cut off mid-stream keeps what arrived.
     fn end_active_turn(&self, outcome: Value) {
-        let turn = self.take_run().map(|run| run.id);
-        if let Some(turn) = turn.as_deref() {
-            self.finish_step_reply(turn, None, true);
-            self.close_unfinished_tools();
-        }
-        self.cancelling.store(false, Ordering::SeqCst);
-        self.prompt_echo.store(false, Ordering::SeqCst);
-        if let Some(turn) = turn {
-            let mut data = json!({ "turnId": turn });
+        let Some(run) = self.take_run() else {
+            return;
+        };
+        self.finish_step_reply(&run.id, None, true);
+        self.close_unfinished_tools();
+        {
+            let mut data = json!({ "turnId": run.id, "clientMessageId": run.client_message_id });
             if let (Some(data), Some(outcome)) = (data.as_object_mut(), outcome.as_object()) {
                 data.extend(outcome.clone());
             }
             self.publish("turn.end", data);
         }
+        self.publish_summary();
     }
 
     fn recovery_succeeded(&self) {
@@ -4858,62 +4959,83 @@ impl Session {
         self.restarts.settle();
     }
 
+    /// Start the next waiting message as a run, when the session is up, the
+    /// queue is not paused after a Stop, and nothing else may run. Checked and
+    /// claimed at once.
     fn start_queued_turn(self: &Arc<Self>) -> bool {
-        // One run at a time, whoever started the one in progress.
-        if self.queue_paused.load(Ordering::Relaxed) || self.run_guard().is_some() {
+        if self.queue_paused.load(Ordering::Relaxed)
+            || !matches!(
+                self.status(),
+                Status::Idle | Status::Running | Status::WaitingApproval | Status::WaitingQuestion
+            )
+        {
             return false;
         }
-        let Some(item) = ({
-            let mut queue = self
-                .queued_turns
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            // A held message is its extension's to release, and a displaced prompt
-            // waits for the runtime's answer; sending either would send it twice.
-            queue.iter().position(|item| !item.held && !item.prompted).and_then(|at| queue.remove(at))
-        }) else {
+        let started = {
+            let mut queue = self.queue_guard();
+            let mut run = self.run_guard();
+            if !Self::free_for_run(&run, &queue) {
+                None
+            } else {
+                // A held message is its extension's to release; sending it too would send it twice.
+                let at = queue.iter().position(|item| !item.held && !item.prompted);
+                at.and_then(|at| queue.remove(at)).map(|item| {
+                    let client = item.client_message_id().unwrap_or_default().to_string();
+                    let row = item.row.map(|row| Self::stamped_row(row, &item.turn));
+                    if let Some(row) = row.clone() {
+                        self.push_history(row);
+                    }
+                    *run = Some(Run::user(&item.turn, &client, None, item.prompt, row.clone(), RunPhase::Claimed));
+                    (item.turn, row.is_some())
+                })
+            }
+        };
+        let Some((turn, delivered)) = started else {
             return false;
         };
-        let Queued { turn, prompt, row, .. } = item;
-        if let Some(row) = row.clone() {
-            self.deliver_user_row(row, &turn);
+        self.clear_reply();
+        if delivered {
+            if let Some(row) = self.history_row(&format!("{turn}:user")) {
+                self.publish("message.user", row);
+            }
         }
-        let client_message_id = prompt.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
-        self.open_user_run(&turn, &client_message_id, None, prompt.clone(), RunPhase::Sent);
-        self.publish(
-            "turn.start",
-            json!({ "turnId": turn, "phase": "running" }),
-        );
-        self.set_status(Status::Running);
+        self.publish("turn.start", json!({ "turnId": turn, "phase": "running" }));
+        self.sync_status();
         self.publish_summary();
-        if let Err(error) = self.write_command(prompt.clone()) {
-            self.queued_turns
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .push_front(Queued { turn: turn.clone(), prompt, row: None, steered: None, no_steer: true, held: false, prompted: false });
-            self.take_run();
+        if let Err(error) = self.write_prompt(&turn) {
+            if let Some(run) = self.run_guard().take_if(|run| run.id == turn) {
+                if let Some(prompt) = run.prompt {
+                    self.queue_guard().push_front(Queued { turn, prompt, row: None, steered: None, no_steer: true, held: false, prompted: false });
+                }
+            }
             self.fail(error.code, &error.message, error.retryable);
         }
         true
     }
 
-    fn flush_pending_prompts(self: &Arc<Self>) {
-        let prompts: Vec<Value> = self
-            .pending_prompts
+    /// The newest history row with this id.
+    fn history_row(&self, id: &str) -> Option<Value> {
+        self.history
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .drain(..)
-            .collect();
-        if prompts.is_empty() {
+            .iter()
+            .rev()
+            .find(|row| row.get("id").and_then(Value::as_str) == Some(id))
+            .cloned()
+    }
+
+    /// Write the prompt parked while the runtime started.
+    fn flush_parked_prompt(self: &Arc<Self>) {
+        let Some(id) = self
+            .run_guard()
+            .as_ref()
+            .filter(|run| run.phase == RunPhase::Starting)
+            .map(|run| run.id.clone())
+        else {
             return;
-        }
-        self.run_sent();
-        self.set_status(Status::Running);
-        for prompt in prompts {
-            if let Err(error) = self.write_command(prompt) {
-                self.fail(error.code, &error.message, error.retryable);
-                return;
-            }
+        };
+        if let Err(error) = self.write_prompt(&id) {
+            self.fail(error.code, &error.message, error.retryable);
         }
     }
 
@@ -4995,10 +5117,8 @@ impl Session {
                                 .unwrap_or_else(|poisoned| poisoned.into_inner()) =
                                 Some(json!({ "clientMessageId": id, "text": failed_text.unwrap_or_default() }));
                         }
-                        self.cancelling.store(false, Ordering::SeqCst);
                         self.cancel_pending("runtime-exited");
                         self.queue_paused.store(true, Ordering::SeqCst);
-                        self.prompt_echo.store(false, Ordering::SeqCst);
                         self.steers_in_flight.store(0, Ordering::SeqCst);
                         self.reclaim_waiting.store(false, Ordering::SeqCst);
                         // The runtime's own queue went with it.

@@ -33,13 +33,13 @@ export function SessionAlerts({ alerts }: { alerts: readonly SessionAlert[] }) {
 
 /**
  * Messages sent while a reply runs, in the order the runtime will read them. Each
- * can be taken back to edit or removed until the runtime has used it, except one
- * Flow control holds (it delivers that one itself). After Stop they wait for
- * Continue (or Discard).
+ * can be taken back to edit or removed until the runtime has it: one Flow control
+ * holds (it delivers that one itself) or one the runtime is answering cannot.
+ * After Stop they are returned and wait for Continue (or Discard).
  */
 export function SteerQueue({ items, onEdit, onRemove, onContinue, onDiscard }: { items: readonly QueuedMessage[]; onEdit: (clientMessageId: string) => void; onRemove: (clientMessageId: string) => void; onContinue: () => void; onDiscard: () => void }) {
   if (!items.length) return null;
-  const paused = items.some(item => item.state === "paused");
+  const paused = items.some(item => item.state === "returned");
   return <section aria-label="Queued messages" className="mb-1 rounded-lg border border-border bg-muted/40 px-3 py-2 text-[11px]">
     <div className="flex flex-wrap items-center gap-2">
       <span className="min-w-0 flex-1 text-muted-foreground">{paused
@@ -54,6 +54,8 @@ export function SteerQueue({ items, onEdit, onRemove, onContinue, onDiscard }: {
         {item.state === "held"
           // Flow control took it and releases it when its gate opens; /flow is where it can be changed.
           ? <span className="shrink-0 text-muted-foreground" title="Flow control is holding this message. Run /flow to see or release it.">Held by Flow</span>
+          : item.state === "delivering"
+          ? null
           : <>
             <Button variant="ghost" className="size-6 p-0" aria-label="Edit queued message" title="Edit" onClick={() => onEdit(item.clientMessageId)}><Pencil className="size-3" /></Button>
             <Button variant="ghost" className="size-6 p-0" aria-label="Remove queued message" title="Remove" onClick={() => onRemove(item.clientMessageId)}><X className="size-3" /></Button>

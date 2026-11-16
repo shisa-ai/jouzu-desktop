@@ -61,7 +61,13 @@ export interface ActiveTurn {
   step?: TurnStep;
 }
 /** A message waiting for the running turn (steer) or, after Stop, for Continue. */
-export interface QueuedMessage { clientMessageId: string; text: string; state: string; images: number }
+/**
+ * A message waiting for the run, as the host reports it: `queued` (handed to
+ * the run at its next step), `delivering` (the runtime has it and has not
+ * answered), `held` (an extension holds it and delivers it itself), or
+ * `returned` (Stop gave it back; it waits for Continue or Discard).
+ */
+export interface QueuedMessage { clientMessageId: string; text: string; state: "queued" | "delivering" | "held" | "returned"; images: number }
 /** An approval or question the host is waiting on; rendered from host data only. */
 export interface PendingPrompt {
   kind: "approval" | "question";

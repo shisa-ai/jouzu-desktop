@@ -34,13 +34,31 @@ describes no screens; what a person sees is in the UI document.
 ## 3. Runs
 
 - A run starts on the runtime's `agent_start` and ends on `agent_settled`,
-  whoever started it (the person, Flow, a command). `run.origin` records who.
-- On send, the host chooses prompt or steer from whether the runtime is
-  streaming, not from whether the host started the run.
-- During retry or compaction the runtime does not accept user input. The host
-  keeps the message in the queue with state `held` and delivers it afterwards.
-- Steers the runtime drops on Stop go back to the queue with state `returned`;
-  the caller continues or discards them.
+  whoever started it (the person, or the runtime itself: Flow, an extension).
+  `run.origin` records who (`user` / `runtime`). The host keeps exactly one run;
+  status (`running`, waiting on an approval or question, `idle`) is derived
+  from it, never stored beside it.
+- A send claims the run only when none is in progress and no prompt of ours is
+  still unanswered; claiming and the queue check happen together, so a message
+  never waits behind a run that has just ended. Otherwise it goes to the queue.
+- The prompt is written only if its run is still the one in progress. If the
+  runtime starts a run of its own first, that run replaces ours and our message
+  goes back to the front of the queue (`delivering` while the runtime still has
+  the prompt, `queued` otherwise); the runtime's answer to the prompt decides
+  what happens to it (refused: steered into the run; `handled`: done or held;
+  `started`: it is the run).
+- During a run, queued messages are handed over as steers once the run takes
+  them: it is streaming and its first reply has started, and it is not retrying,
+  compacting or stopping. Until then they stay `queued`.
+- Stop is one host command for the run in progress, whoever started it. The
+  host decides how: a prompt still parked for the runtime's start is removed
+  (`cancelled`); anything else is aborted (`cancelling`, shown as the run's
+  phase), and a run that starts only after Stop is aborted when it does.
+  Waiting messages are returned to the caller (`returned`), who continues or
+  discards them.
+- Queue states: `queued` (waiting for the run), `delivering` (the runtime has it
+  and has not answered; it can no longer be edited or removed), `held` (an
+  extension took it and delivers it itself), `returned` (after Stop).
 - A message leaves the queue only after the runtime confirms it used it.
 - Open question: confirm that a message sent while a Flow run is streaming is
   delivered as a steer under these rules.
@@ -136,7 +154,7 @@ succeed, the response says so. Examples:
 | Field | Content |
 |---|---|
 | `lifecycle` | `pending` / `starting` / `ready` / `recovering` / `stopped` / `failed` |
-| `run` | `id`, `origin` (`user` / `runtime` / `command`), `phase`, `startedAt`, `step`, `clientMessageId?` |
+| `run` (sent as `activeTurn`) | `id`, `origin` (`user` / `runtime`), `phase` (`starting` / `running` / `cancelling`), `startedAt`, `step`, `clientMessageId?` |
 | `queue[]` | Message, state (`queued` / `held` / `delivering` / `returned`), `error?` |
 | `model` | `provider`, `id`, `name`, `state` (`resolving` / `ready` / `unavailable`), `catalogRevision` |
 | `thinkingLevel` | Current value |

@@ -155,10 +155,10 @@ describe("SessionStore", () => {
       status: "idle",
       cursor: 9,
       activeTurn: null,
-      queue: [{ turnId: "m-2", clientMessageId: "c-2", text: "two", images: 0, state: "paused" }],
+      queue: [{ turnId: "m-2", clientMessageId: "c-2", text: "two", images: 0, state: "returned" }],
       failedTurn: { clientMessageId: "c-3", text: "three" },
     }));
-    expect(store.snapshot.queue).toMatchObject([{ clientMessageId: "c-2", text: "two", state: "paused" }]);
+    expect(store.snapshot.queue).toMatchObject([{ clientMessageId: "c-2", text: "two", state: "returned" }]);
     expect(store.snapshot.failedTurn).toEqual({ clientMessageId: "c-3", text: "three" });
   });
 
@@ -194,9 +194,24 @@ describe("SessionStore", () => {
     expect(store.snapshot.activeTurn?.phase).toBe("running");
     session.emit(event(2, "session.updated", { status: "running", activeTurn: { turnId: "m-4", origin: "runtime", phase: "cancelling" }, queue: [] }));
     expect(store.snapshot.activeTurn?.phase).toBe("cancelling");
-    session.emit(event(3, "session.updated", { status: "idle", activeTurn: null, queue: [{ clientMessageId: "c-2", text: "two", state: "paused", images: 0 }] }));
+    session.emit(event(3, "session.updated", { status: "idle", activeTurn: null, queue: [{ clientMessageId: "c-2", text: "two", state: "returned", images: 0 }] }));
     expect(store.running).toBe(false);
-    expect(store.snapshot.queue).toEqual([{ clientMessageId: "c-2", text: "two", state: "paused", images: 0 }]);
+    expect(store.snapshot.queue).toEqual([{ clientMessageId: "c-2", text: "two", state: "returned", images: 0 }]);
+  });
+
+  it("asks the host to stop a run its own message started, and takes the turn only from snapshots", async () => {
+    const session = fakeSession();
+    const calls: string[] = [];
+    session.interrupt = async () => { calls.push("interrupt"); };
+    session.cancel = async (id: string) => { calls.push(`cancel:${id}`); };
+    const store = SessionStore.attach(session);
+    session.emit(event(1, "session.updated", { status: "running", activeTurn: { turnId: "m-1", origin: "user", clientMessageId: "c-1", phase: "running" }, queue: [] }));
+    // Turn events say what happened; they do not move the turn the host reports.
+    session.emit(event(2, "turn.end", { turnId: "m-1", clientMessageId: "c-1", aborted: true }));
+    session.emit(event(3, "turn.start", { turnId: "m-9", phase: "running" }));
+    expect(store.snapshot.activeTurn).toMatchObject({ turnId: "m-1", clientMessageId: "c-1" });
+    await store.stop();
+    expect(calls).toEqual(["interrupt"]);
   });
 
   it("puts the message back when Stop does not reach the host", async () => {

@@ -826,8 +826,7 @@ async fn interrupt_session(
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<Value>, ApiError> {
     let session = state.sessions.get(&id).ok_or_else(session_not_found)?;
-    session.interrupt()?;
-    Ok(Json(json!({ "status": session.status().as_str() })))
+    Ok(Json(session.interrupt()?))
 }
 
 async fn cancel_session(
@@ -3462,7 +3461,7 @@ mod session_tests {
         tokio::time::sleep(Duration::from_millis(200)).await;
         let summary = session.summary();
         assert_eq!(queue_texts(&session), vec!["two"], "{summary}");
-        assert_eq!(summary["queue"][0]["state"], "paused", "{summary}");
+        assert_eq!(summary["queue"][0]["state"], "returned", "{summary}");
         // A client that attaches now (a reopened window) sees the same queue.
         let snapshot = session.snapshot_event().data;
         assert_eq!(snapshot["queue"], summary["queue"], "{snapshot}");
@@ -3591,11 +3590,169 @@ mod session_tests {
         let summary = session.summary();
         assert!(summary["activeTurn"].is_null(), "{summary}");
         assert_eq!(queue_texts(&session), vec!["two"], "{summary}");
-        assert_eq!(summary["queue"][0]["state"], "paused", "{summary}");
+        assert_eq!(summary["queue"][0]["state"], "returned", "{summary}");
         session.continue_queue().unwrap();
         wait_until(|| queue_texts(&session).is_empty() && session.status() == Status::Idle && std::fs::read_to_string(&prompt_log).is_ok_and(|text| text.lines().count() == 1)).await;
         let rows = conversation(&session);
         assert_eq!(rows.iter().filter(|row| *row == "user:two").count(), 1, "{rows:?}");
+    }
+
+    /// Stop is the host's: it reports the run as stopping, ends it, and a run
+    /// the runtime starts on its own right after (Flow resuming) is a run like
+    /// any other: shown, given waiting messages as steers, and stoppable.
+    #[tokio::test]
+    async fn stop_reports_stopping_and_a_run_the_runtime_starts_after_it_is_stoppable() {
+        let prompts = tempfile::NamedTempFile::new().unwrap();
+        let prompt_log = prompts.path().to_str().unwrap().to_string();
+        let (manager, _home, workspace) = manager_with_env(
+            200,
+            &[
+                ("FAKE_RUNTIME_SELF_RUN", "stop"),
+                ("FAKE_RUNTIME_SELF_RUN_TEXT", "flow picks its task list up again and keeps writing for a while"),
+                ("FAKE_RUNTIME_DELAY_MS", "60"),
+                ("FAKE_RUNTIME_PROMPT_LOG", &prompt_log),
+            ],
+        );
+        let session = manager
+            .create(workspace.path().to_str().unwrap(), None, None)
+            .unwrap();
+        wait_status(&session, Status::Idle).await;
+        session.send("first", "a reply that is long enough to stop part way").unwrap();
+        wait_until(|| session.summary()["activeTurn"]["phase"] == "running" && !conversation(&session).iter().any(|row| row.starts_with("assistant:"))).await;
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let stopped = session.interrupt().unwrap();
+        assert_eq!(stopped["status"], "cancelling", "{stopped}");
+        // Flow starts its own run once the stopped one settles.
+        wait_until(|| session.summary()["activeTurn"]["origin"] == "runtime").await;
+        let summary = session.summary();
+        assert_eq!(summary["activeTurn"]["phase"], "running", "{summary}");
+        assert_eq!(summary["status"], "running", "{summary}");
+        let receipt = session.send("second", "two").unwrap();
+        assert_eq!(receipt["waiting"], true, "{receipt}");
+        let stopped = session.interrupt().unwrap();
+        assert_eq!(stopped["status"], "cancelling", "{stopped}");
+        assert_eq!(session.summary()["activeTurn"]["phase"], "cancelling");
+        wait_until(|| session.status() == Status::Idle).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let summary = session.summary();
+        assert!(summary["activeTurn"].is_null(), "{summary}");
+        assert_eq!(queue_texts(&session), vec!["two"], "{summary}");
+        assert_eq!(summary["queue"][0]["state"], "returned", "{summary}");
+        assert_eq!(session.interrupt().unwrap()["status"], "idle");
+        session.continue_queue().unwrap();
+        wait_until(|| queue_texts(&session).is_empty() && session.status() == Status::Idle && std::fs::read_to_string(&prompt_log).is_ok_and(|text| text.lines().count() == 2)).await;
+        let rows = conversation(&session);
+        assert_eq!(rows.iter().filter(|row| *row == "user:two").count(), 1, "{rows:?}");
+    }
+
+    /// Stop while the prompt is still in the runtime's input handlers, where an
+    /// abort finds no run: the host stops the run when it starts.
+    #[tokio::test]
+    async fn stop_before_the_runtime_starts_the_run_stops_it_when_it_starts() {
+        let (manager, _home, workspace) = manager_with_env(
+            200,
+            &[
+                ("FAKE_RUNTIME_INPUT_DELAY_MS", "300"),
+                ("FAKE_RUNTIME_DELAY_MS", "60"),
+            ],
+        );
+        let session = manager
+            .create(workspace.path().to_str().unwrap(), None, None)
+            .unwrap();
+        wait_status(&session, Status::Idle).await;
+        session.send("first", "a reply that would take a good while to write out").unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let stopped = session.interrupt().unwrap();
+        assert_eq!(stopped["status"], "cancelling", "{stopped}");
+        let summary = session.summary();
+        assert_eq!(summary["activeTurn"]["phase"], "cancelling", "{summary}");
+        assert_eq!(summary["status"], "running", "{summary}");
+        wait_until(|| session.status() == Status::Idle).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(session.summary()["activeTurn"].is_null());
+        let rows = conversation(&session);
+        assert!(
+            !rows.iter().any(|row| row == "assistant:a reply that would take a good while to write out"),
+            "the run was stopped, not answered in full: {rows:?}"
+        );
+    }
+
+    /// A prompt the runtime answers "started" whose run ends before the agent
+    /// starts (no `agent_start`): the settle still ends the run.
+    #[tokio::test]
+    async fn a_run_that_settles_without_starting_ends() {
+        let (manager, _home, workspace) = manager_with_env(200, &[]);
+        let session = manager
+            .create(workspace.path().to_str().unwrap(), None, None)
+            .unwrap();
+        wait_status(&session, Status::Idle).await;
+        session.send("first", "NOSTART one").unwrap();
+        wait_until(|| session.status() == Status::Idle && session.summary()["activeTurn"].is_null()).await;
+        session.send("second", "two").unwrap();
+        wait_until(|| session.status() == Status::Idle && conversation(&session).last().map(String::as_str) == Some("assistant:two")).await;
+    }
+
+    /// A prompt displaced by a run the runtime started, which the runtime then
+    /// starts after all (its own run ended while the prompt waited in the input
+    /// handlers): it becomes the run, with its row once in history.
+    #[tokio::test]
+    async fn a_displaced_prompt_the_runtime_starts_later_becomes_the_run() {
+        let steers = tempfile::NamedTempFile::new().unwrap();
+        let steer_log = steers.path().to_str().unwrap().to_string();
+        let (manager, _home, workspace) = manager_with_env(
+            200,
+            &[
+                ("FAKE_RUNTIME_SELF_RUN", "prompt"),
+                ("FAKE_RUNTIME_SELF_RUN_TEXT", "ok"),
+                ("FAKE_RUNTIME_INPUT_DELAY_MS", "500"),
+                ("FAKE_RUNTIME_DELAY_MS", "15"),
+                ("FAKE_RUNTIME_STEER_LOG", &steer_log),
+            ],
+        );
+        let session = manager
+            .create(workspace.path().to_str().unwrap(), None, None)
+            .unwrap();
+        wait_status(&session, Status::Idle).await;
+        session.send("mine", "hello").unwrap();
+        wait_until(|| session.summary()["queue"][0]["state"] == "delivering").await;
+        wait_until(|| session.summary()["activeTurn"]["clientMessageId"] == "mine").await;
+        wait_until(|| session.status() == Status::Idle).await;
+        let summary = session.summary();
+        assert!(summary["failedTurn"].is_null() && summary["queue"].as_array().is_some_and(Vec::is_empty), "{summary}");
+        let rows = conversation(&session);
+        assert_eq!(rows, vec!["assistant:ok", "user:hello", "assistant:hello"], "{rows:?}");
+        assert_eq!(std::fs::read_to_string(&steer_log).unwrap_or_default(), "", "never steered");
+    }
+
+    /// Removing a message the runtime has as a prompt it has not answered: it
+    /// cannot be taken back, so the host drops it when the runtime answers.
+    #[tokio::test]
+    async fn removing_a_displaced_prompt_drops_it_when_the_runtime_answers() {
+        let steers = tempfile::NamedTempFile::new().unwrap();
+        let steer_log = steers.path().to_str().unwrap().to_string();
+        let (manager, _home, workspace) = manager_with_env(
+            200,
+            &[
+                ("FAKE_RUNTIME_SELF_RUN", "prompt"),
+                ("FAKE_RUNTIME_SELF_RUN_TEXT", "flow work that was already scheduled"),
+                ("FAKE_RUNTIME_INPUT_DELAY_MS", "300"),
+                ("FAKE_RUNTIME_DELAY_MS", "40"),
+                ("FAKE_RUNTIME_STEER_LOG", &steer_log),
+            ],
+        );
+        let session = manager
+            .create(workspace.path().to_str().unwrap(), None, None)
+            .unwrap();
+        wait_status(&session, Status::Idle).await;
+        session.send("mine", "hello").unwrap();
+        wait_until(|| session.summary()["queue"][0]["state"] == "delivering").await;
+        assert_eq!(session.cancel_message("mine").unwrap()["status"], "cancelling");
+        wait_until(|| session.status() == Status::Idle && queue_texts(&session).is_empty()).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let rows = conversation(&session);
+        assert!(!rows.iter().any(|row| row == "user:hello"), "{rows:?}");
+        assert_eq!(std::fs::read_to_string(&steer_log).unwrap_or_default(), "", "never steered");
+        assert!(session.summary()["activeTurn"].is_null());
     }
 
     #[tokio::test]

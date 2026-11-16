@@ -263,6 +263,9 @@ function prompt(id, text, images) {
     busy = true;
     interrupted = false;
     response(id, "prompt", { disposition: "started" });
+    // "NOSTART <text>": the run ends before the agent starts (a model call
+    // that throws first); the runtime still settles it.
+    if (String(text).startsWith("NOSTART ")) { settled(false); return; }
     run(String(text), images);
   };
   const inputDelay = Number(process.env.FAKE_RUNTIME_INPUT_DELAY_MS ?? 0);
@@ -404,10 +407,7 @@ lines.on("line", line => {
       response(value.id, "switch_session", { cancelled: false });
       break;
     case "prompt":
-      if (busy || inputPhase) {
-        failure(value.id, "prompt", "prompt while busy");
-        break;
-      }
+      // Refused (if a run is going) only once its input handlers are done.
       prompt(value.id, String(value.message ?? ""), value.images);
       break;
     case "steer": {
