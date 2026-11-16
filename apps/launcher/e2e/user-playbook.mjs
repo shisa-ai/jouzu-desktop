@@ -222,6 +222,8 @@ async function webAccessScenario() {
     await save(dialog);
     await dialog.getByText(/Serving at:/).waitFor({ timeout: 15_000 });
     await dialog.getByRole("button", { name: "Pair a device" }).click();
+    // The pairing links render after the click: read them once they are there.
+    await page.waitForFunction(() => [...document.querySelectorAll('[role="dialog"] input, [role="dialog"] textarea')].some(node => node.value.includes("/pair?code=")), null, { timeout: 15_000 });
     const links = await dialog.getByRole("textbox").evaluateAll(nodes => nodes.map(node => node.value).filter(value => value.includes("/pair?code=")));
     const local = links.find(url => url.startsWith("http://127.0.0.1:"));
     const network = links.find(url => !url.startsWith("http://127.0.0.1:"));
@@ -614,6 +616,8 @@ try {
   // PLAYBOOK_SCENARIO=run-ownership runs only the run scenarios (send during a
   // reply, Stop, sending as a reply ends).
   if (process.env.PLAYBOOK_SCENARIO === "run-ownership") {
+    // Start from the chat, whatever an earlier run left open.
+    await page.keyboard.press("Escape");
     await freshSession();
     await chooseModel();
     await runOwnershipScenarios();
