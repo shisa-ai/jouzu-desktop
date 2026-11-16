@@ -10,7 +10,7 @@ import { changedFiles, snapshotComplete, type WorkspaceSnapshot } from "./worksp
 import { loadCollapsed, saveCollapsed, toggleCollapsed } from "./sidebar-state";
 import { ArtifactsPanel } from "./artifacts-panel";
 import { useApi } from "./api/context";
-import type { JouzuApi, SessionSummary as ApiSessionSummary } from "./api/jouzu-api";
+import type { JouzuApi } from "./api/jouzu-api";
 import { collectOutputReferences } from "./artifact-references";
 import { PanelStart } from "./panel-start";
 import { FilesPanel } from "./files-panel";
@@ -29,7 +29,7 @@ import { BackgroundMenu, deriveFlow, deriveSubagents, FlowMenu, latestFlowError,
 import { SessionStatsBar } from "./session-stats-bar";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "./components/ui/tabs";
 import type { TextGuardMode } from "./session-notices";
-import { opensLive } from "./session-open";
+import { opensLive, sessionRow as fromApiSession, type SessionRow as SessionSummary } from "./session-open";
 import { useWarmRuntime, warmBlocks, type WarmView } from "./warm-runtime";
 import { newId, copyText } from "./secure-context";
 
@@ -39,7 +39,6 @@ function defaultPaneWidth() {
 }
 
 interface WorkspaceItem { id: string; path: string }
-interface SessionSummary { path: string; title: string; workspace: string; updated: number; pinned: boolean; archived: boolean; running: boolean; status: string }
 
 /** A saved session shown from its file before (or without) attaching it. */
 type SessionPreview = {
@@ -477,26 +476,6 @@ export function ChatWorkspace({ path, revision = 0, newSession = true, locked = 
     document.addEventListener("keydown", escape);
     return () => { document.removeEventListener("mousedown", close); document.removeEventListener("keydown", escape); };
   }, [pickerOpen]);
-  function fromApiSession(value: ApiSessionSummary): SessionSummary | null {
-    if (!value.sessionPath) return null;
-    const title = value.title?.trim() ?? "";
-    const fileId = value.sessionPath.split(/[\\/]/u).at(-1)?.replace(/\.jsonl$/u, "") ?? "";
-    // Empty page-load sessions can come back from the persisted index with the
-    // file id as a title. That is not a user-facing title.
-    if (!title || title === fileId) return null;
-    const parsed = value.updatedAt ? Date.parse(value.updatedAt) : NaN;
-    const updated = Number.isFinite(parsed) && parsed > 0 ? parsed / 1000 : Date.now() / 1000;
-    return {
-      path: value.sessionPath,
-      title,
-      workspace: value.workspacePath,
-      updated,
-      pinned: value.pinned,
-      archived: value.archived,
-      running: value.running,
-      status: value.status,
-    };
-  }
 
   async function refreshSessions() {
     try {

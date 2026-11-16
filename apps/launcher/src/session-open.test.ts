@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { opensLive } from "./session-open";
+import { opensLive, sessionRow } from "./session-open";
 
 describe("opensLive", () => {
   it("opens a session waiting for an approval or an answer live", () => {
@@ -23,5 +23,13 @@ describe("opensLive", () => {
     expect(opensLive({ status: "idle", running: false })).toBe(false);
     expect(opensLive({ status: "stopped", running: false })).toBe(false);
     expect(opensLive(undefined)).toBe(false);
+  });
+});
+
+describe("sessionRow", () => {
+  it("keeps what the host holds, so the row opens live", () => {
+    const row = sessionRow({ sessionId: "s-1", sessionPath: "C:/w/a.jsonl", workspacePath: "C:/w", title: "Count", status: "idle", running: false, pinned: false, archived: false, queued: 1 });
+    expect(row).toMatchObject({ path: "C:/w/a.jsonl", queued: 1 });
+    expect(opensLive(row ?? undefined)).toBe(true);
   });
 });
