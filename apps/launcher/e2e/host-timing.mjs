@@ -42,3 +42,26 @@ export function hostGateProblem(timing, limit = HOST_GATE_LIMIT_MS) {
   if (first.slowest > limit * 2) return `gate sendToModelRequest: slowest ${first.slowest} > ${limit * 2}`;
   return null;
 }
+
+/**
+ * Run ownership, read from host.log after the run scenarios: the host never had
+ * two runs at once (`run.overlap`), and the runtime refused nothing the host
+ * sent (`runtime.response_failed`), except the one refusal the design expects:
+ * a prompt that lost the race to a run the runtime started, which is then
+ * steered ("Agent is already processing"). Returns problems in words.
+ */
+export function runLogProblems(text, { from = 0, to = Number.POSITIVE_INFINITY } = {}) {
+  const problems = [];
+  for (const line of text.split(/\r?\n/)) {
+    let entry;
+    try { entry = JSON.parse(line); } catch { continue; }
+    const at = Date.parse(entry?.ts);
+    if (!(at >= from && at <= to)) continue;
+    const f = entry.fields ?? {};
+    if (entry.event === "run.overlap") problems.push(`run.overlap at ${entry.ts}`);
+    if (entry.event === "runtime.response_failed" && !(f.command === "prompt" && /already processing/i.test(String(f.message)))) {
+      problems.push(`runtime.response_failed (${f.command}): ${String(f.message).slice(0, 120)}`);
+    }
+  }
+  return problems;
+}

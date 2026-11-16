@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 // @ts-expect-error plain ESM script shared with the playbook report and the stable exam
-import { hostGateProblem, hostTiming } from "../e2e/host-timing.mjs";
+import { hostGateProblem, hostTiming, runLogProblems } from "../e2e/host-timing.mjs";
 
 const line = (ms: number, mark: string, session: string, id: string) =>
   JSON.stringify({ event: "timing", ts: new Date(Date.UTC(2026, 10, 16, 0, 0, 0, ms)).toISOString(), fields: { mark, session, clientMessageId: id } });
@@ -44,5 +44,17 @@ describe("host timing gate (#129)", () => {
     const text = log([[600, 30], [40, 30]]);
     const from = Date.UTC(2026, 10, 16, 0, 0, 10);
     expect(hostTiming(text, { from }).first.samples).toEqual([40]);
+  });
+});
+
+describe("run ownership in host.log", () => {
+  const entry = (event: string, fields: object, ms = 0) => JSON.stringify({ event, ts: new Date(Date.UTC(2026, 10, 16, 0, 0, 0, ms)).toISOString(), fields });
+  it("passes the expected refusal of a prompt that lost to a runtime run", () => {
+    expect(runLogProblems(entry("runtime.response_failed", { command: "prompt", message: "Agent is already processing. Specify streamingBehavior" }))).toEqual([]);
+  });
+  it("reports an overlap and any other refusal, inside the window only", () => {
+    const text = [entry("run.overlap", {}, 10), entry("runtime.response_failed", { command: "steer", message: "boom" }, 20), entry("run.overlap", {}, 5_000)].join("\n");
+    const window = { from: Date.UTC(2026, 10, 16), to: Date.UTC(2026, 10, 16) + 1_000 };
+    expect(runLogProblems(text, window)).toHaveLength(2);
   });
 });

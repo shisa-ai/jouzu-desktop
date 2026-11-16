@@ -4,7 +4,7 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, 
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { writeLongSession } from './long-session.mjs';
-import { hostTiming, hostGateProblem } from '../e2e/host-timing.mjs';
+import { hostTiming, hostGateProblem, runLogProblems } from '../e2e/host-timing.mjs';
 
 // The stable release exam (#86): the full user playbook, with a real model, against the
 // stable build, on throwaway data folders. Every scenario and every gate must pass;
@@ -115,6 +115,19 @@ try {
       : null;
     const problem = existsSync(log) ? hostGateProblem(timing) : `gate sendToModelRequest: no host.log at ${log}`;
     report.runs.push({ name: 'host-timing', problems: problem ? [problem] : [], result: timing });
+  }
+  await browser.close();
+  // The run belongs to the host: a message sent during a reply is read by it, Stop
+  // ends it, nothing is lost or sent twice; host.log shows no overlap or refusal.
+  browser = await openBrowser(mainHost, 9227);
+  const runs = await run('run-ownership', 'e2e/user-playbook.mjs', { PLAYBOOK_CDP: 'http://127.0.0.1:9227', PLAYBOOK_SCENARIO: 'run-ownership', PLAYBOOK_SHISA_API_KEY: '' });
+  judge(runs);
+  {
+    const log = join(main, 'logs', 'host.log');
+    const problems = !existsSync(log) ? [`no host.log at ${log}`]
+      : runs.result ? runLogProblems(readFileSync(log, 'utf8'), { from: Date.parse(runs.result.startedAt), to: Date.parse(runs.result.finishedAt ?? new Date().toISOString()) })
+      : ['no run-ownership report'];
+    report.runs.push({ name: 'run-ownership-log', problems, result: null });
   }
   await browser.close();
   const restart = await run('entry-restart', 'e2e-runtime/entry-restart.mjs', { JOUZU_E2E_HOST_HOME: main });

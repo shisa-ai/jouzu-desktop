@@ -317,6 +317,128 @@ async function longSessionScenario() {
   scenario(name, ok, ok ? `${turns} turns reached in ${clicks} clicks; branch holds turn 1 only` : `branch shows: ${branched.slice(0, 300)}`);
 }
 
+/**
+ * The session's run belongs to one owner, the host: a message sent while a reply
+ * runs is read by that reply, Stop ends it, and nothing sent is lost or shown
+ * twice, whenever it was sent. PLAYBOOK_SCENARIO=run-ownership runs these only.
+ * The long reply works on a real model (300 numbers take a while) and on the
+ * fixture provider ("SLOW" holds the reply open).
+ */
+const longPrompt = "SLOW: count from 1 to 300, one number per line, nothing else.";
+const alerts = () => page.getByRole("alert");
+const queued = () => page.getByRole("region", { name: "Queued messages" });
+const userCount = text => conversation().getByText(text, { exact: true }).count();
+async function chooseModel() {
+  await page.getByRole("button", { name: /model/i }).first().click();
+  const modelName = new RegExp(process.env.PLAYBOOK_MODEL ?? "qwen 3\\.8 flash next", "i");
+  await page.getByRole("menuitemradio").filter({ hasText: modelName }).first().click();
+  await page.getByText(modelName).first().waitFor({ timeout: 5_000 });
+}
+async function freshSession() {
+  await newSession().click();
+  await composer().waitFor({ timeout: 10_000 });
+}
+async function sendText(text, image = false) {
+  if (image) {
+    await page.getByLabel("Choose images", { exact: true }).setInputFiles({ name: "red-square.png", mimeType: "image/png", buffer: await redSquarePng() });
+    await page.getByRole("list", { name: "Attached images" }).waitFor({ timeout: 10_000 });
+  }
+  await composer().fill(text);
+  await send().click();
+}
+async function turnEnds(timeout = 180_000) {
+  await stop().waitFor({ state: "detached", timeout });
+  await send().waitFor({ timeout: 10_000 });
+}
+/** Continue messages Stop returned, if any; then wait for the session to be idle. */
+async function continueReturned() {
+  const resume = queued().getByRole("button", { name: "Continue", exact: true });
+  if (await resume.count()) {
+    await resume.click();
+    await turnEnds();
+  }
+}
+
+async function runOwnershipScenarios() {
+  const images = async () => (await page.getByLabel("Choose images", { exact: true }).count()) > 0;
+
+  // 1. Sent while a reply runs: the reply reads it (text, then text with an image);
+  //    nothing is refused, nothing errors, each message shows once.
+  {
+    const name = "A message sent while a reply runs is read by that reply, not refused";
+    await freshSession();
+    await sendText(longPrompt);
+    await stop().waitFor({ timeout: 10_000 });
+    await conversation().getByText(/waiting-for-steer|\b1\b/).first().waitFor({ timeout: 60_000 });
+    const steer = "While you count: also say the word BANANA once at the end.";
+    await sendText(steer);
+    const withImage = await images();
+    const steerImage = "And tell me the color of this square in one word.";
+    if (withImage) await sendText(steerImage, true);
+    await turnEnds();
+    await continueReturned();
+    const counts = [await userCount(steer), withImage ? await userCount(steerImage) : 1];
+    const errors = await alerts().count();
+    scenario(name, counts.every(n => n === 1) && errors === 0 && !await queued().count(), `shown ${counts.join("/")} times; alerts ${errors}; image ${withImage}`);
+    await page.screenshot({ path: process.env.TEMP + "\\playbook-run-1-steer.png" });
+  }
+
+  // 2. Stop while a reply runs, with a message waiting: the reply ends at once, the
+  //    waiting message is kept (read already, or returned to continue), never lost.
+  {
+    const name = "Stop during a reply ends it and keeps the waiting message";
+    await freshSession();
+    await sendText(longPrompt);
+    await stop().waitFor({ timeout: 10_000 });
+    const waiting = "After counting, say DONE.";
+    await sendText(waiting);
+    await page.waitForTimeout(500);
+    const start = now();
+    await stop().click();
+    await turnEnds(10_000);
+    record("stopToSendReady", [now() - start]);
+    const returned = await queued().count() > 0;
+    await continueReturned();
+    const shown = await userCount(waiting);
+    scenario(name, shown === 1 && await alerts().count() === 0, `returned to queue: ${returned}; shown ${shown} times; Stop to Send ready ${now() - start} ms`);
+    await page.screenshot({ path: process.env.TEMP + "\\playbook-run-2-stop.png" });
+  }
+
+  // 3. Stop pressed right after Send, before anything was written: the session goes
+  //    back to idle and the next message gets its reply.
+  {
+    const name = "Stop right after Send leaves the session usable";
+    await freshSession();
+    await sendText(longPrompt);
+    await stop().click({ timeout: 5_000 });
+    await turnEnds(10_000);
+    await sendText("What is 12 × 12? Reply with only the number.");
+    await waitForConversationText("144", 60_000).catch(() => {});
+    await turnEnds();
+    const text = await conversation().innerText();
+    scenario(name, text.includes("144") && await alerts().count() === 0, text.slice(-200));
+  }
+
+  // 4. A message (with an image when the model takes images) sent the moment a reply
+  //    ends: it is neither lost nor sent twice, and it gets its own reply.
+  {
+    const name = "A message sent as a reply ends is neither lost nor sent twice";
+    await freshSession();
+    const results = [];
+    for (let n = 1; n <= 3; n++) {
+      await sendText(`What is 13 × ${n}? Reply with only the number.`);
+      await waitForConversationText(String(13 * n), 60_000);
+      const edge = `Edge ${n}: what is 7 × ${n + 1}? Reply with only the number.`;
+      await sendText(edge, n === 2 && await images());
+      await turnEnds();
+      await continueReturned();
+      results.push(await userCount(edge));
+    }
+    scenario(name, results.every(n => n === 1) && await alerts().count() === 0, `each shown ${results.join("/")} times`);
+    await page.screenshot({ path: process.env.TEMP + "\\playbook-run-4-edge.png" });
+  }
+}
+
 async function openSettingsTab(name) {
   await page.getByRole("button", { name: "Settings", exact: true }).first().click();
   await settingsDialog().getByRole("tab", { name }).click();
@@ -438,6 +560,14 @@ try {
   // that holds the long saved session (#20).
   if (process.env.PLAYBOOK_SCENARIO === "long-session") {
     await longSessionScenario();
+    throw Object.assign(new Error("done"), { done: true });
+  }
+  // PLAYBOOK_SCENARIO=run-ownership runs only the run scenarios (send during a
+  // reply, Stop, sending as a reply ends).
+  if (process.env.PLAYBOOK_SCENARIO === "run-ownership") {
+    await freshSession();
+    await chooseModel();
+    await runOwnershipScenarios();
     throw Object.assign(new Error("done"), { done: true });
   }
 
