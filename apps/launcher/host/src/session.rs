@@ -2913,7 +2913,9 @@ impl Session {
     /// Whether a new run may start for a message: none is in progress, and no
     /// prompt of ours is still with the runtime unanswered (it may yet start one).
     fn free_for_run(run: &Option<Run>, queue: &VecDeque<Queued>) -> bool {
-        run.is_none() && !queue.iter().any(|item| item.prompted)
+        // A steer the last run did not use is still in the runtime's queue
+        // until it is taken back; a prompt written before then would take it.
+        run.is_none() && !queue.iter().any(|item| item.prompted || item.steered.is_some())
     }
 
     /// The session's status while it is up, from its run and what it waits on.
@@ -3079,7 +3081,10 @@ impl Session {
         let Some(prompt) = mine.prompt else { return };
         let client = mine.client_message_id.clone().unwrap_or_default();
         let prompted = mine.phase == RunPhase::Sent;
-        let row = self.take_user_row(&mine.id).or(mine.row);
+        // Its row joined history when it was claimed. Taken back only while it
+        // is the newest row; otherwise it stays where it is and the queue
+        // carries none, so it is never in history twice.
+        let row = self.take_user_row(&mine.id);
         log(
             &self.home,
             "info",
@@ -3180,7 +3185,11 @@ impl Session {
                 // The runtime's run ended before it took the prompt: it starts a run with it.
                 let mut run = self.run_guard();
                 if run.is_some() {
-                    queue.remove(at);
+                    // Should not happen: the host already has a run. Never
+                    // dropped and never sent again on its own: it is returned
+                    // to the user, who continues or discards it.
+                    queue[at].prompted = false;
+                    self.queue_paused.store(true, Ordering::SeqCst);
                     Answer::Overlap
                 } else {
                     let item = queue.remove(at).expect("position is in the queue");
@@ -5003,10 +5012,10 @@ impl Session {
         self.sync_status();
         self.publish_summary();
         if let Err(error) = self.write_prompt(&turn) {
-            if let Some(run) = self.run_guard().take_if(|run| run.id == turn) {
-                if let Some(prompt) = run.prompt {
-                    self.queue_guard().push_front(Queued { turn, prompt, row: None, steered: None, no_steer: true, held: false, prompted: false });
-                }
+            // Lock order is queue, then run: take the run first, on its own.
+            let taken = self.run_guard().take_if(|run| run.id == turn);
+            if let Some(prompt) = taken.and_then(|run| run.prompt) {
+                self.queue_guard().push_front(Queued { turn, prompt, row: None, steered: None, no_steer: true, held: false, prompted: false });
             }
             self.fail(error.code, &error.message, error.retryable);
         }
