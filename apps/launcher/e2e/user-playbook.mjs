@@ -225,7 +225,11 @@ async function webAccessScenario() {
     const links = await dialog.getByRole("textbox").evaluateAll(nodes => nodes.map(node => node.value).filter(value => value.includes("/pair?code=")));
     const local = links.find(url => url.startsWith("http://127.0.0.1:"));
     const network = links.find(url => !url.startsWith("http://127.0.0.1:"));
-    const base = new URL(local).origin;
+    // With the network on, the pairing links may name only network addresses; this
+    // computer's address is the one "Serving at" lists.
+    const serving = await dialog.getByText(/Serving at:/).innerText();
+    const base = local ? new URL(local).origin : /http:\/\/127\.0\.0\.1:\d+/.exec(serving)?.[0];
+    if (!base) throw new Error(`no address on this computer in: ${serving}`);
 
     // Unpaired: pairing page only.
     const stranger = await visit(base + "/");
@@ -467,11 +471,13 @@ async function runOwnershipScenarios() {
     const name = "A message sent as a reply ends is neither lost nor sent twice";
     await freshSession();
     const results = [];
-    for (let n = 1; n <= 3; n++) {
+    // From 2: the answer 13 would match the question itself.
+    for (let n = 2; n <= 4; n++) {
       await sendText(`What is 13 × ${n}? Reply with only the number.`);
-      await waitForConversationText(String(13 * n), 60_000);
+      // A real model may say more than the number; the number is enough.
+      await conversation().getByText(new RegExp(`\\b${13 * n}\\b`)).first().waitFor({ timeout: 60_000 });
       const edge = `Edge ${n}: what is 7 × ${n + 1}? Reply with only the number.`;
-      await sendText(edge, n === 2 && await images());
+      await sendText(edge, n === 3 && await images());
       await turnEnds();
       await continueReturned();
       results.push(await shownTimes(edge));
