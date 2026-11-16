@@ -3638,6 +3638,11 @@ mod session_tests {
         assert!(summary["activeTurn"].is_null(), "{summary}");
         assert_eq!(queue_texts(&session), vec!["two"], "{summary}");
         assert_eq!(summary["queue"][0]["state"], "returned", "{summary}");
+        // The session list says the host holds a message for this idle session,
+        // so a client opens it live rather than from its file.
+        let info = session.info();
+        assert_eq!(info["queued"], 1, "{info}");
+        assert_eq!(info["status"], "idle", "{info}");
         assert_eq!(session.interrupt().unwrap()["status"], "idle");
         session.continue_queue().unwrap();
         wait_until(|| queue_texts(&session).is_empty() && session.status() == Status::Idle && std::fs::read_to_string(&prompt_log).is_ok_and(|text| text.lines().count() == 2)).await;

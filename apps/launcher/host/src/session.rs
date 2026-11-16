@@ -4437,6 +4437,15 @@ impl Session {
             "pendingQuestions": self.pending_questions(),
             "pendingApprovalCount": self.pending_approvals().len(),
             "pendingQuestionCount": self.pending_questions().len(),
+            // What only the host holds for this session, idle or not: messages
+            // waiting (queued, held, returned by Stop) and a failed message to
+            // retry. A client opens such a session live, not from its file.
+            "queued": self.queue_guard().len(),
+            "hasFailedTurn": self
+                .failed_turn
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_some(),
         })
     }
 

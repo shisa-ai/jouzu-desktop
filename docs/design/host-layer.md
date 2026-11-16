@@ -163,6 +163,10 @@ succeed, the response says so. Examples:
 | `failure` | Why the session ended, and the available recovery (`restart` / `remove-images` / `clear-flow`) |
 | `flow`, `textguard` | Their own state |
 
+The session list entry carries what the host holds for a session even while it
+is idle (`queued` count, `hasFailedTurn`), so a client opens such a session
+through the host, never from its saved file, which has none of it.
+
 ### 7.2 AppView (global)
 
 | Field | Content |

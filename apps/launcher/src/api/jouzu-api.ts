@@ -61,6 +61,10 @@ export interface SessionSummary {
   archived: boolean;
   pendingApprovals?: number;
   pendingQuestions?: number;
+  /** Messages the host holds for this session (waiting, held, or returned by Stop). */
+  queued?: number;
+  /** The host holds a failed message to retry. */
+  hasFailedTurn?: boolean;
 }
 
 export interface SessionHandle {
