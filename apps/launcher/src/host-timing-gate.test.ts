@@ -57,4 +57,8 @@ describe("run ownership in host.log", () => {
     const window = { from: Date.UTC(2026, 10, 16), to: Date.UTC(2026, 10, 16) + 1_000 };
     expect(runLogProblems(text, window)).toHaveLength(2);
   });
+  it("asks for a steer when one is expected", () => {
+    expect(runLogProblems("", { expectSteer: true })).toHaveLength(1);
+    expect(runLogProblems(entry("queue.steer_sent", {}), { expectSteer: true })).toEqual([]);
+  });
 });

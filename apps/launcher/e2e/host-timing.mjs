@@ -48,20 +48,26 @@ export function hostGateProblem(timing, limit = HOST_GATE_LIMIT_MS) {
  * two runs at once (`run.overlap`), and the runtime refused nothing the host
  * sent (`runtime.response_failed`), except the one refusal the design expects:
  * a prompt that lost the race to a run the runtime started, which is then
- * steered ("Agent is already processing"). Returns problems in words.
+ * steered ("Agent is already processing"). With `expectSteer`, at least one
+ * message must have been handed to a running reply (`queue.steer_sent`).
+ * Returns problems in words.
  */
-export function runLogProblems(text, { from = 0, to = Number.POSITIVE_INFINITY } = {}) {
+export function runLogProblems(text, { from = 0, to = Number.POSITIVE_INFINITY, expectSteer = false } = {}) {
   const problems = [];
+  let steered = 0;
   for (const line of text.split(/\r?\n/)) {
     let entry;
     try { entry = JSON.parse(line); } catch { continue; }
     const at = Date.parse(entry?.ts);
     if (!(at >= from && at <= to)) continue;
     const f = entry.fields ?? {};
+    if (entry.event === "queue.steer_sent") steered += 1;
     if (entry.event === "run.overlap") problems.push(`run.overlap at ${entry.ts}`);
     if (entry.event === "runtime.response_failed" && !(f.command === "prompt" && /already processing/i.test(String(f.message)))) {
       problems.push(`runtime.response_failed (${f.command}): ${String(f.message).slice(0, 120)}`);
     }
   }
+  // A message sent during a reply must reach it as a steer, not wait for the reply's end.
+  if (expectSteer && steered === 0) problems.push("no queue.steer_sent: nothing sent during a reply was handed to it");
   return problems;
 }

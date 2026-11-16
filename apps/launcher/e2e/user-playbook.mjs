@@ -328,6 +328,31 @@ const longPrompt = "SLOW: count from 1 to 300, one number per line, nothing else
 const alerts = () => page.getByRole("alert");
 const queued = () => page.getByRole("region", { name: "Queued messages" });
 const userCount = text => conversation().getByText(text, { exact: true }).count();
+/** The composer's submit button: "Send" when idle, "Steer" while a reply runs. */
+const submit = () => page.getByRole("button", { name: /^(send|steer)$/i }).first();
+/** The reply has really started writing: the fixture's marker, or a line "3" of the count. */
+async function replyWriting(timeout = 60_000) {
+  await page.waitForFunction(prompt => {
+    const region = document.querySelector('[aria-label="Conversation"], [aria-label="conversation"]');
+    const text = (region?.textContent ?? document.body.innerText).replace(prompt, "");
+    return /waiting-for-steer|\b3\b/.test(text);
+  }, longPrompt, { timeout });
+}
+/** Wait until `text` is shown exactly `n` times (the transcript may still be catching up). */
+async function shownTimes(text, n = 1, timeout = 10_000) {
+  const until = now() + timeout;
+  let count = await userCount(text);
+  while (count !== n && now() < until) {
+    await page.waitForTimeout(200);
+    count = await userCount(text);
+  }
+  return count;
+}
+/** The session is idle and stays so: Stop gone, Send back, for a second. */
+async function staysIdle() {
+  await page.waitForTimeout(1_000);
+  return !await stop().isVisible() && await send().isVisible();
+}
 async function chooseModel() {
   await page.getByRole("button", { name: /model/i }).first().click();
   const modelName = new RegExp(process.env.PLAYBOOK_MODEL ?? "qwen 3\\.8 flash next", "i");
@@ -344,7 +369,7 @@ async function sendText(text, image = false) {
     await page.getByRole("list", { name: "Attached images" }).waitFor({ timeout: 10_000 });
   }
   await composer().fill(text);
-  await send().click();
+  await submit().click();
 }
 async function turnEnds(timeout = 180_000) {
   await stop().waitFor({ state: "detached", timeout });
@@ -355,6 +380,8 @@ async function continueReturned() {
   const resume = queued().getByRole("button", { name: "Continue", exact: true });
   if (await resume.count()) {
     await resume.click();
+    // The continued message starts a turn of its own; it may also end before Stop is seen.
+    await stop().waitFor({ timeout: 5_000 }).catch(() => {});
     await turnEnds();
   }
 }
@@ -369,17 +396,23 @@ async function runOwnershipScenarios() {
     await freshSession();
     await sendText(longPrompt);
     await stop().waitFor({ timeout: 10_000 });
-    await conversation().getByText(/waiting-for-steer|\b1\b/).first().waitFor({ timeout: 60_000 });
+    await replyWriting();
     const steer = "While you count: also say the word BANANA once at the end.";
     await sendText(steer);
+    // Sent while the reply still ran (the button said Steer and Stop was still there).
+    let duringRun = await stop().isVisible();
     const withImage = await images();
     const steerImage = "And tell me the color of this square in one word.";
-    if (withImage) await sendText(steerImage, true);
+    if (withImage) {
+      await sendText(steerImage, true);
+      duringRun &&= await stop().isVisible();
+    }
     await turnEnds();
     await continueReturned();
-    const counts = [await userCount(steer), withImage ? await userCount(steerImage) : 1];
+    const counts = [await shownTimes(steer), withImage ? await shownTimes(steerImage) : 1];
     const errors = await alerts().count();
-    scenario(name, counts.every(n => n === 1) && errors === 0 && !await queued().count(), `shown ${counts.join("/")} times; alerts ${errors}; image ${withImage}`);
+    const idle = await staysIdle();
+    scenario(name, duringRun && counts.every(n => n === 1) && errors === 0 && !await queued().count() && idle, `sent during the reply: ${duringRun}; shown ${counts.join("/")} times; alerts ${errors}; image ${withImage}; idle after: ${idle}`);
     await page.screenshot({ path: process.env.TEMP + "\\playbook-run-1-steer.png" });
   }
 
@@ -390,6 +423,7 @@ async function runOwnershipScenarios() {
     await freshSession();
     await sendText(longPrompt);
     await stop().waitFor({ timeout: 10_000 });
+    await replyWriting();
     const waiting = "After counting, say DONE.";
     await sendText(waiting);
     await page.waitForTimeout(500);
@@ -397,10 +431,12 @@ async function runOwnershipScenarios() {
     await stop().click();
     await turnEnds(10_000);
     record("stopToSendReady", [now() - start]);
+    const stopMs = now() - start;
     const returned = await queued().count() > 0;
     await continueReturned();
-    const shown = await userCount(waiting);
-    scenario(name, shown === 1 && await alerts().count() === 0, `returned to queue: ${returned}; shown ${shown} times; Stop to Send ready ${now() - start} ms`);
+    const shown = await shownTimes(waiting);
+    const idle = await staysIdle();
+    scenario(name, shown === 1 && await alerts().count() === 0 && idle, `returned to queue: ${returned}; shown ${shown} times; Stop to Send ready ${stopMs} ms; idle after: ${idle}`);
     await page.screenshot({ path: process.env.TEMP + "\\playbook-run-2-stop.png" });
   }
 
@@ -416,7 +452,8 @@ async function runOwnershipScenarios() {
     await waitForConversationText("144", 60_000).catch(() => {});
     await turnEnds();
     const text = await conversation().innerText();
-    scenario(name, text.includes("144") && await alerts().count() === 0, text.slice(-200));
+    const idle = await staysIdle();
+    scenario(name, text.includes("144") && await alerts().count() === 0 && idle, `idle after: ${idle}; ${text.slice(-200)}`);
   }
 
   // 4. A message (with an image when the model takes images) sent the moment a reply
@@ -432,9 +469,10 @@ async function runOwnershipScenarios() {
       await sendText(edge, n === 2 && await images());
       await turnEnds();
       await continueReturned();
-      results.push(await userCount(edge));
+      results.push(await shownTimes(edge));
     }
-    scenario(name, results.every(n => n === 1) && await alerts().count() === 0, `each shown ${results.join("/")} times`);
+    const idle = await staysIdle();
+    scenario(name, results.every(n => n === 1) && await alerts().count() === 0 && idle, `each shown ${results.join("/")} times; idle after: ${idle}`);
     await page.screenshot({ path: process.env.TEMP + "\\playbook-run-4-edge.png" });
   }
 }
@@ -726,3 +764,4 @@ const text = JSON.stringify(result, null, 2);
 console.log(text);
 if (out) await (await import("node:fs/promises")).writeFile(out, text);
 await browser.close();
+process.exitCode = result.pass ? 0 : 1;

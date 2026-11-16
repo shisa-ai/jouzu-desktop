@@ -125,7 +125,7 @@ try {
   {
     const log = join(main, 'logs', 'host.log');
     const problems = !existsSync(log) ? [`no host.log at ${log}`]
-      : runs.result ? runLogProblems(readFileSync(log, 'utf8'), { from: Date.parse(runs.result.startedAt), to: Date.parse(runs.result.finishedAt ?? new Date().toISOString()) })
+      : runs.result ? runLogProblems(readFileSync(log, 'utf8'), { from: Date.parse(runs.result.startedAt), to: Date.parse(runs.result.finishedAt ?? new Date().toISOString()), expectSteer: true })
       : ['no run-ownership report'];
     report.runs.push({ name: 'run-ownership-log', problems, result: null });
   }
