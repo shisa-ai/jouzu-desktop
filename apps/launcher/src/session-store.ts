@@ -96,7 +96,8 @@ function activeTurnOf(value: unknown): ActiveTurn | null {
   const turn = record(value);
   const turnId = text(turn?.turnId);
   if (!turn || !turnId) return null;
-  return { turnId, clientMessageId: text(turn.clientMessageId), phase: text(turn.phase) ?? "running", startedAt: time(turn.startedAt), step: stepOf(turn.step) };
+  const origin = turn.origin === "runtime" ? "runtime" as const : turn.origin === "user" ? "user" as const : undefined;
+  return { turnId, origin, clientMessageId: text(turn.clientMessageId), phase: text(turn.phase) ?? "running", startedAt: time(turn.startedAt), step: stepOf(turn.step) };
 }
 
 /** A displayable Flow report: a jouzu-flow message whose text is a JSON object with a kind. */
@@ -546,9 +547,11 @@ export class SessionStore {
   }
 
   /**
-   * Stop: cancel everything this window still has in flight, then the turn the
-   * host is running. The host's cancel works in every phase (tombstone before
-   * acceptance, removal while starting, abort while running).
+   * Stop: cancel everything this window still has in flight, then the run the
+   * host is running, whoever started it (a run the runtime started itself has
+   * no message of ours, so it is interrupted). The host's cancel works in every
+   * phase (tombstone before acceptance, removal while starting, abort while
+   * running); the run's phase ("cancelling") and its end come from the host.
    */
   async stop(): Promise<void> {
     const pending = (this.state.outbox ?? []).filter(entry => entry.state === "sending");
@@ -556,18 +559,18 @@ export class SessionStore {
     const ids = new Set(pending.map(entry => entry.clientMessageId));
     if (turn?.clientMessageId) ids.add(turn.clientMessageId);
     if (pending.length) this.setOutbox((this.state.outbox ?? []).filter(entry => entry.state !== "sending"));
-    if (turn) this.update({ activeTurn: { ...turn, phase: "cancelling" } });
     if (turn || pending.length) this.markShown("stop.shown", turn?.clientMessageId ?? pending[0]?.clientMessageId);
     try {
-      if (ids.size) await Promise.all([...ids].map(id => this.session.cancel(id)));
-      else if (turn) await this.session.interrupt();
+      await Promise.all([
+        ...[...ids].map(id => this.session.cancel(id)),
+        ...(turn && !turn.clientMessageId ? [this.session.interrupt()] : []),
+      ]);
     } catch (error) {
       // Stop did not take effect: put back what it took away. The messages
       // still being sent finish or fail on their own, as if Stop was not pressed.
       const outbox = this.state.outbox ?? [];
       const restore = pending.filter(entry => !outbox.some(item => item.clientMessageId === entry.clientMessageId));
       if (restore.length) this.setOutbox([...outbox, ...restore]);
-      if (turn && this.state.activeTurn?.turnId === turn.turnId && this.state.activeTurn.phase === "cancelling") this.update({ activeTurn: turn });
       this.update({ error: describeError(error) });
     }
   }

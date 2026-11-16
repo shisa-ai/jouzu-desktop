@@ -14,7 +14,6 @@ export interface ChatProjection {
   flowReports: FlowReportRecord[];
   running: boolean;
   turnStartedAt?: number;
-  compatibility: string[];
   /**
    * Where `messages[0]` stands in the conversation relative to the first page
    * loaded: 0, or negative once earlier pages are put in front. Rows keep
@@ -22,7 +21,7 @@ export interface ChatProjection {
    */
   firstIndex?: number;
 }
-export function emptyProjection(): ChatProjection { return { messages: [], activeMessage: null, tools: {}, flowReports: [], running: false, turnStartedAt: undefined, compatibility: [] }; }
+export function emptyProjection(): ChatProjection { return { messages: [], activeMessage: null, tools: {}, flowReports: [], running: false, turnStartedAt: undefined }; }
 export function object(value: unknown): value is WireObject { return !!value && typeof value === "object" && !Array.isArray(value); }
 function contentShape(value: unknown): string {
   if (!Array.isArray(value)) return value === null ? "null" : typeof value;
@@ -224,102 +223,4 @@ export function interruptUnfinishedTools(state: ChatProjection): ChatProjection 
     }];
   }));
   return changed ? { ...state, tools } : state;
-}
-function compatibility(state: ChatProjection, type: string): ChatProjection {
-  return { ...state, compatibility: [...new Set([...state.compatibility, type])].slice(-32) };
-}
-const passiveEvents = new Set(["turn_start", "turn_end", "agent_end", "queue_update", "entry_appended", "session_info_changed", "thinking_level_changed", "compaction_start", "compaction_end", "auto_retry_start", "auto_retry_end", "summarization_retry_scheduled", "summarization_retry_attempt_start", "summarization_retry_finished"]);
-export function projectEvent(state: ChatProjection, event: WireObject): ChatProjection {
-  const next = projectEventInner(state, event);
-  return next.running ? next : interruptUnfinishedTools(next);
-}
-function projectEventInner(state: ChatProjection, event: WireObject): ChatProjection {
-  const type = event.type;
-  if (typeof type !== "string") throw new Error("Runtime event has no type");
-  if (type === "agent_start") return { ...state, running: true, turnStartedAt: state.turnStartedAt ?? Date.now() };
-  if (type === "agent_settled") return interruptUnfinishedTools({ ...state, running: false, turnStartedAt: undefined });
-  if (type === "message_start") {
-    const message = parseMessage(event.message);
-    return { ...state, messages: [...state.messages, { ...message, timestamp: message.timestamp ?? Date.now() }], activeMessage: state.messages.length };
-  }
-  if (type === "message_end") {
-    const message = parseMessage(event.message);
-    if (state.activeMessage === null) throw new Error("Runtime ended a message without starting it");
-    const active = state.messages[state.activeMessage];
-    return { ...state, messages: state.messages.map((item, index) => index === state.activeMessage ? { ...message, timestamp: message.timestamp ?? active.timestamp, endedAt: Date.now(), usage: message.usage ?? active.usage } : item), activeMessage: null };
-  }
-  if (type === "message_update") {
-    if (state.activeMessage === null || !object(event.assistantMessageEvent)) throw new Error("Runtime message update has no active message");
-    const update = event.assistantMessageEvent;
-    const index = update.contentIndex;
-    if (typeof update.type !== "string") throw new Error("Invalid runtime content event");
-    if (update.type === "start") return state;
-    if (!Number.isInteger(index) || (index as number) < 0 || (index as number) > 4095) throw new Error("Invalid runtime content index");
-    const message = state.messages[state.activeMessage];
-    const content = [...message.content];    const blockIndex = index as number;
-    const previous = content[blockIndex];
-    switch (update.type) {
-      case "text_start": content[blockIndex] = { type: "text", text: "" }; break;
-      case "thinking_start": content[blockIndex] = { type: "thinking", thinking: "" }; break;
-      case "text_delta":
-      case "thinking_delta": {
-        if (typeof update.delta !== "string") throw new Error("Invalid runtime text delta");
-        const thinking = update.type === "thinking_delta";
-        if (previous?.type !== (thinking ? "thinking" : "text")) throw new Error("Runtime delta has no matching content block");
-        content[blockIndex] = thinking ? { ...previous, thinking: (previous.thinking ?? "") + update.delta } : { ...previous, text: (previous.text ?? "") + update.delta };
-        break;
-      }
-      case "text_end":
-      case "thinking_end": {
-        if (typeof update.content !== "string") throw new Error("Invalid completed runtime text");
-        content[blockIndex] = update.type === "text_end" ? { type: "text", text: update.content } : { type: "thinking", thinking: update.content };
-        break;
-      }
-      case "toolcall_start":
-        if (typeof update.id !== "string" || typeof update.toolName !== "string") throw new Error("Invalid runtime tool call");
-        content[blockIndex] = { type: "toolCall", id: update.id, name: update.toolName }; break;
-      case "toolcall_delta": return state; // Partial JSON arguments are not executable or authoritative.
-      case "toolcall_end":
-        if (!object(update.toolCall) || update.toolCall.type !== "toolCall") throw new Error("Invalid completed runtime tool call");
-        content[blockIndex] = update.toolCall as unknown as ChatBlock; break;
-      default: return compatibility(state, `message_update:${update.type}`);
-    }
-    return { ...state, messages: state.messages.map((item, position) => position === state.activeMessage ? { ...message, content, ...(object(event.usage) ? { usage: event.usage as ChatMessage["usage"] } : {}) } : item) };
-  }
-  if (type === "custom_message" || type === "entry_appended") {
-    const entry = type === "entry_appended" ? (object(event.entry) ? event.entry : undefined) : event;
-    if (entry && typeof entry.customType === "string" && entry.customType.startsWith("jouzu-flow") && entry.display !== false) {
-      const text = (Array.isArray(entry.content) ? entry.content : [])
-        .map(block => object(block) && block.type === "text" && typeof block.text === "string" ? block.text : "")
-        .filter(Boolean)
-        .join("\n");
-      let kind: string | undefined;
-      try { const parsed = JSON.parse(text); kind = object(parsed) && typeof parsed.kind === "string" ? parsed.kind : undefined; } catch { /* keep the raw text */ }
-      if (text && kind) {
-        const report = { kind, text, ...(typeof entry.timestamp === "number" ? { timestamp: entry.timestamp } : {}) };
-        return { ...state, flowReports: [...state.flowReports, report].slice(-30) };
-      }
-    }
-    if (type === "entry_appended") return state;
-  }
-  if (type === "tool_execution_start" || type === "tool_execution_update" || type === "tool_execution_end") {
-    if (typeof event.toolCallId !== "string" || typeof event.toolName !== "string") throw new Error("Invalid runtime tool event");
-    const prior = state.tools[event.toolCallId];
-    if (type !== "tool_execution_start" && !prior) {
-      // A resumed session can receive an update/end whose start was emitted before
-      // the history snapshot. Recover the card instead of failing the whole stream.
-      const recovered: ToolView = {
-        id: event.toolCallId,
-        name: event.toolName,
-        args: event.args,
-        phase: type === "tool_execution_end" ? event.isError === true ? "error" : "complete" : "running",
-        result: type === "tool_execution_end" ? event.result : event.partialResult,
-      };
-      return { ...state, tools: { ...state.tools, [recovered.id]: recovered } };
-    }
-    const tool: ToolView = { id: event.toolCallId, name: event.toolName, args: event.args ?? prior?.args, phase: type === "tool_execution_end" ? event.isError === true ? "error" : "complete" : "running", result: type === "tool_execution_end" ? event.result : type === "tool_execution_update" ? event.partialResult : undefined };
-    return { ...state, tools: { ...state.tools, [tool.id]: tool } };
-  }
-  if (passiveEvents.has(type)) return state;
-  return compatibility(state, type);
 }

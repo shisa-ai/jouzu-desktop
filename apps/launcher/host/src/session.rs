@@ -537,6 +537,10 @@ struct Queued {
     /// runtime's queue later. Still the user's, still not delivered: never sent
     /// again by the host while held.
     held: bool,
+    /// Written as a prompt while the runtime started a run of its own; the
+    /// runtime has not answered it yet. It refuses it (the message is then
+    /// steered) or, if that run ended first, starts a run with it.
+    prompted: bool,
 }
 
 impl Queued {
@@ -547,6 +551,55 @@ impl Queued {
     fn text(&self) -> &str {
         self.prompt.get("message").and_then(Value::as_str).unwrap_or("")
     }
+}
+
+/// Who started a run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RunOrigin {
+    /// A message the user sent.
+    User,
+    /// The runtime itself (Flow continuing its work, an extension).
+    Runtime,
+}
+
+impl RunOrigin {
+    fn as_str(self) -> &'static str {
+        match self {
+            RunOrigin::User => "user",
+            RunOrigin::Runtime => "runtime",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RunPhase {
+    /// The prompt waits for the runtime's handshake.
+    Starting,
+    /// The prompt was written; the runtime has not answered it yet.
+    Sent,
+    /// The runtime accepted the prompt; its run is about to start.
+    Accepted,
+    /// Between the runtime's `agent_start` and `agent_settled`.
+    Streaming,
+}
+
+/// The run in progress: the one answer to "is this session busy". The host
+/// opens it when it hands the runtime a prompt, or on the runtime's
+/// `agent_start` when the runtime started it itself; it ends on
+/// `agent_settled`, whoever started it, or when a failure ends it.
+#[derive(Clone)]
+struct Run {
+    id: String,
+    origin: RunOrigin,
+    phase: RunPhase,
+    /// The user's message that started it.
+    client_message_id: Option<String>,
+    /// The client that sent that message.
+    client: Option<String>,
+    /// The prompt written for that message, kept until the run starts: a run
+    /// the runtime starts first refuses it, and it goes back to the queue.
+    prompt: Option<Value>,
+    started_at: String,
 }
 
 const STEER_ID_PREFIX: &str = "steer:";
@@ -606,11 +659,8 @@ pub struct Session {
     pending_prompts: Mutex<Vec<Value>>,
     next_message: AtomicU64,
     next_request: AtomicU64,
-    active_message: Mutex<Option<String>>,
-    active_client_message: Mutex<Option<String>>,
-    turn_started_at: Mutex<Option<String>>,
+    run: Mutex<Option<Run>>,
     cancelling: AtomicBool,
-    turn_running: AtomicBool,
     /// A model request was cut off by a runtime exit. The runtime's Flow control
     /// withholds it (and any new input) until someone decides; the host already
     /// decided (the turn failed), so recovery releases the hold before going idle.
@@ -645,7 +695,6 @@ pub struct Session {
     assistant_text: Mutex<String>,
     assistant_blocks: Mutex<Vec<Value>>,
     step: Mutex<StepState>,
-    active_client: Mutex<Option<String>>,
     model: Mutex<Option<Value>>,
     pending_model: Mutex<Option<Value>>,
     /// The request that applies a model chosen before the runtime started; its
@@ -736,13 +785,6 @@ impl Session {
         );
     }
 
-    fn active_client(&self) -> Option<String> {
-        self.active_client
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()
-    }
-
     pub fn history(&self, limit: usize, before: Option<u64>) -> Value {
         let limit = limit.clamp(1, 1000);
         let history = self
@@ -769,14 +811,7 @@ impl Session {
         // said. This row is synthetic: the step's reply is appended to history
         // when the runtime finishes writing it. It is the newest row, so only
         // the newest page carries it, never an earlier one.
-        let active = if before.is_some() {
-            None
-        } else {
-            self.active_message
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .clone()
-        };
+        let active = if before.is_some() { None } else { self.run_id() };
         if let Some(turn) = active {
             let text = self
                 .assistant_text
@@ -859,6 +894,26 @@ impl Session {
         self.publish("message.user", row);
     }
 
+    /// Whether the run in progress takes the user's waiting messages now, as
+    /// steer. The one place this is decided.
+    ///
+    /// It follows the runtime's rule for input during a run, whoever started
+    /// the run (the user or the runtime itself, such as Flow): a streaming run
+    /// takes steer, except during a provider retry or a compaction, when the
+    /// runtime does not take input; the messages then wait in the host queue
+    /// and go in once those end. Whether a message sent during a run the
+    /// runtime started should be a steer is still a product decision; changing
+    /// it changes only this function.
+    fn run_takes_steer(&self) -> bool {
+        let streaming = self.run_guard().as_ref().is_some_and(|run| run.phase == RunPhase::Streaming);
+        streaming
+            && matches!(
+                self.status(),
+                Status::Running | Status::WaitingApproval | Status::WaitingQuestion
+            )
+            && !matches!(self.step_guard().state, "retrying" | "compacting")
+    }
+
     /// Hand every waiting message to the running turn. The runtime delivers
     /// each one at its next step boundary, before the next model call. Not
     /// before the run's first reply has started: the runtime would put it in
@@ -867,11 +922,7 @@ impl Session {
         if !self.replying.load(Ordering::SeqCst)
             || self.queue_paused.load(Ordering::SeqCst)
             || self.cancelling.load(Ordering::SeqCst)
-            || self.active_turn().is_none()
-            || !matches!(
-                self.status(),
-                Status::Running | Status::WaitingApproval | Status::WaitingQuestion
-            )
+            || !self.run_takes_steer()
         {
             return;
         }
@@ -883,7 +934,7 @@ impl Session {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             queue
                 .iter_mut()
-                .filter(|item| item.steered.is_none() && !item.no_steer && !item.held)
+                .filter(|item| item.steered.is_none() && !item.no_steer && !item.held && !item.prompted)
                 .map(|item| {
                     item.steered = Some(generation);
                     pi::command::with_id(
@@ -965,14 +1016,14 @@ impl Session {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .iter()
             .any(|item| item.held);
-        if waiting && held && self.active_turn().is_none() {
+        if waiting && held && self.run_id().is_none() {
             self.clear_runtime_queue();
         }
     }
 
     /// A user message the runtime put into the running turn.
     fn user_message_started(&self, message: Option<&Value>) {
-        let Some(turn) = self.active_turn() else { return };
+        let Some(turn) = self.run_id() else { return };
         if self.prompt_echo.swap(false, Ordering::SeqCst) {
             return;
         }
@@ -1073,7 +1124,7 @@ impl Session {
                 }
             };
             // A command the runtime ran in place: the user's row all the same.
-            if let (Some(item), Some(turn)) = (item, self.active_turn()) {
+            if let (Some(item), Some(turn)) = (item, self.run_id()) {
                 if let Some(row) = item.row {
                     self.deliver_user_row(row, &turn);
                 }
@@ -1111,7 +1162,7 @@ impl Session {
                 }
             }
         }
-        if self.active_turn().is_some() {
+        if self.run_id().is_some() {
             self.steer_queue();
         } else if self.status() == Status::Idle {
             self.start_queued_turn();
@@ -1170,13 +1221,6 @@ impl Session {
         self.step.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    fn active_turn_id(&self) -> Option<String> {
-        self.active_message
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()
-    }
-
     /// The turn in progress, as clients show it: which step and what it is doing.
     fn step_view(&self) -> Value {
         let step = self.step_guard();
@@ -1214,12 +1258,8 @@ impl Session {
         let mut data = json!({
             "session": self.id,
             "mark": mark,
-            "turnId": self.active_turn_id(),
-            "clientMessageId": self
-                .active_client_message
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .clone(),
+            "turnId": self.run_id(),
+            "clientMessageId": self.run_client_message(),
         });
         if let (Some(data), Some(fields)) = (data.as_object_mut(), fields.as_object()) {
             for (key, value) in fields {
@@ -1232,7 +1272,7 @@ impl Session {
     /// A new step: the runtime is asking the model again. Whatever the previous
     /// step left unwritten is kept as its reply first.
     fn begin_step(&self) {
-        let Some(turn) = self.active_turn_id() else {
+        let Some(turn) = self.run_id() else {
             return;
         };
         self.finish_step_reply(&turn, None, false);
@@ -1538,10 +1578,12 @@ impl Session {
     /// Content is never logged, only the event and its ids.
     fn record_timing(&self, event: &str, data: &Value) {
         // The prompt reaches the runtime when the turn runs: at its start, or when a
-        // turn that waited for the runtime starts running.
+        // turn that waited for the runtime starts running. A run the runtime started
+        // itself had no prompt to wait for.
         let running = (event == "turn.start" && data.get("phase").and_then(Value::as_str) == Some("running"))
             || (event == "session.status" && data.get("status").and_then(Value::as_str) == Some("running"));
-        if running {
+        let prompted = self.run_guard().as_ref().is_some_and(|run| run.origin == RunOrigin::User);
+        if running && prompted {
             let mut first = self
                 .first_output
                 .lock()
@@ -1564,12 +1606,7 @@ impl Session {
                     .get("messageId")
                     .and_then(Value::as_str)
                     .map(str::to_string)
-                    .or_else(|| {
-                        self.active_message
-                            .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner())
-                            .clone()
-                    })
+                    .or_else(|| self.run_id())
                     .unwrap_or_default();
                 let id = id.as_str();
                 let mut last = self
@@ -1605,12 +1642,7 @@ impl Session {
             .get("clientMessageId")
             .and_then(Value::as_str)
             .map(str::to_string)
-            .or_else(|| {
-                self.active_client_message
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .clone()
-            });
+            .or_else(|| self.run_client_message());
         log(
             &self.home,
             "info",
@@ -1679,9 +1711,6 @@ impl Session {
             }
         }
         if changed {
-            if matches!(status, Status::Running) {
-                self.turn_running.store(true, Ordering::SeqCst);
-            }
             if let Some(runtime) = self
                 .runtime
                 .lock()
@@ -1843,12 +1872,18 @@ impl Session {
             return;
         }
         let reply = pi::reply_to(value);
+        if reply == pi::Reply::Prompt && self.displaced_prompt_answered(response_id, value) {
+            return;
+        }
         if reply == pi::Reply::Prompt
             && value.get("success").and_then(Value::as_bool) == Some(true)
             && value.pointer("/data/disposition").and_then(Value::as_str) == Some("handled")
         {
             self.end_turn_without_run(response_id);
             return;
+        }
+        if reply == pi::Reply::Prompt && value.get("success").and_then(Value::as_bool) == Some(true) {
+            self.run_accepted(response_id);
         }
         // A state answer that arrives while the runtime is switching to this
         // session's file describes the runtime before the switch: a warm runtime
@@ -2051,8 +2086,8 @@ impl Session {
         }
         // A cancelled starting turn has no prompt to flush. Complete the
         // handshake bookkeeping first, then go idle; never go idle while
-        // an accepted turn still has an active message.
-        if self.active_turn().is_none() && !matches!(self.status(), Status::Running) {
+        // a run is in progress (a prompt, or a run the runtime started itself).
+        if self.run_guard().is_none() {
             if !self.start_queued_turn() {
                 self.set_status(Status::Idle);
             }
@@ -2068,34 +2103,19 @@ impl Session {
 
     /// End the active turn for this message without a runtime run.
     fn end_turn(self: &Arc<Self>, client_message_id: &str, outcome: Value) {
-        let matches_active = self
-            .active_client_message
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .as_deref()
-            == Some(client_message_id);
-        if !matches_active {
-            return;
-        }
-        let turn = self
-            .active_message
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take();
-        *self
-            .active_client_message
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
-        *self
-            .turn_started_at
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
-        *self
-            .active_client
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        let turn = {
+            let mut run = self.run_guard();
+            // Only a run that has not started: once the runtime runs it, its
+            // `agent_settled` ends it.
+            let ours = run.as_ref().is_some_and(|run| {
+                run.client_message_id.as_deref() == Some(client_message_id) && run.phase != RunPhase::Streaming
+            });
+            if !ours {
+                return;
+            }
+            run.take().map(|run| run.id)
+        };
         self.cancelling.store(false, Ordering::SeqCst);
-        self.turn_running.store(false, Ordering::SeqCst);
         if let Some(turn) = turn {
             let mut data = json!({ "turnId": turn });
             if let (Some(data), Some(outcome)) = (data.as_object_mut(), outcome.as_object()) {
@@ -2259,11 +2279,7 @@ impl Session {
         // A saved conversation is at rest: a tool call with no result was cut off
         // (the app closed, the runtime stopped). While a turn runs, its own calls
         // may still be at work, so they are left as they are.
-        let resting = self
-            .active_message
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .is_none();
+        let resting = self.run_guard().is_none();
         if resting {
             for row in rows.iter_mut() {
                 if row.get("kind").and_then(Value::as_str) != Some("assistant") {
@@ -2303,21 +2319,9 @@ impl Session {
         self.publish("runtime.event", value.clone());
         match pi::classify(&value) {
             PiRecord::Response => self.handle_response(&value),
-            PiRecord::AgentStart => {
-                // Waiting messages go in once the first reply starts.
-                self.replying.store(false, Ordering::SeqCst);
-                self.set_status(Status::Running);
-                // The runtime runs its input handlers before the agent run exists,
-                // and an abort that lands then finds nothing to stop. The host
-                // already answered that Stop with "cancelling", so it stops this run.
-                if self.cancelling.load(Ordering::SeqCst) {
-                    let id = self.request_id();
-                    // A failed write means the runtime is gone; its exit ends the turn.
-                    let _ = self.write_command(pi::command::with_id(pi::command::abort(), &id));
-                }
-            }
+            PiRecord::AgentStart => self.run_started(),
             PiRecord::TurnStart => {
-                if self.active_turn_id().is_some() {
+                if self.run_id().is_some() {
                     self.begin_step();
                 }
             }
@@ -2336,7 +2340,7 @@ impl Session {
                 if assistant && !self.replying.swap(true, Ordering::SeqCst) {
                     self.steer_queue();
                 }
-                if assistant && self.active_turn_id().is_some() {
+                if assistant && self.run_id().is_some() {
                     // A second reply in one step is a step the runtime did not mark.
                     let (n, written) = {
                         let step = self.step_guard();
@@ -2353,7 +2357,7 @@ impl Session {
                     .and_then(|message| message.get("role"))
                     .and_then(Value::as_str)
                     == Some("assistant");
-                if let (true, Some(turn)) = (assistant, self.active_turn_id()) {
+                if let (true, Some(turn)) = (assistant, self.run_id()) {
                     self.ensure_step();
                     self.finish_step_reply(&turn, message, false);
                 }
@@ -2366,7 +2370,7 @@ impl Session {
                     return;
                 };
                 let kind = pi::delta_kind(&value);
-                let Some(message_id) = self.active_turn_id() else {
+                let Some(message_id) = self.run_id() else {
                     return;
                 };
                 match kind {
@@ -2417,7 +2421,7 @@ impl Session {
                     .unwrap_or("tool")
                     .to_string();
                 if !call_id.is_empty() {
-                    if self.active_turn_id().is_some() {
+                    if self.run_id().is_some() {
                         self.ensure_step();
                     }
                     self.add_to_step_reply(json!({
@@ -2429,7 +2433,7 @@ impl Session {
                     self.push_history(json!({
                         "kind": "tool",
                         "id": format!("tool:{call_id}"),
-                        "turnId": self.active_turn_id(),
+                        "turnId": self.run_id(),
                         "tool": {
                             "name": name,
                             "callId": call_id,
@@ -2521,6 +2525,8 @@ impl Session {
                 );
                 self.step_guard().retry = None;
                 self.set_step_state("waiting_model");
+                // Messages that waited out the retry go in now.
+                self.steer_queue();
                 self.publish_summary();
             }
             PiRecord::CompactionStart => {
@@ -2533,6 +2539,8 @@ impl Session {
                     json!({ "reason": value.get("reason"), "aborted": value.get("aborted") }),
                 );
                 self.set_step_state("waiting_model");
+                // Messages that waited out the compaction go in now.
+                self.steer_queue();
             }
             PiRecord::CustomMessage => {
                 let custom_type = value
@@ -2569,45 +2577,7 @@ impl Session {
                     .get("aborted")
                     .and_then(Value::as_bool)
                     .unwrap_or(false);
-                let active = self
-                    .active_message
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .take();
-                self.active_client
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .take();
-                if let Some(message_id) = active {
-                    let stop_reason = if aborted { "interrupted" } else { "completed" };
-                    // Whatever the last step had not finished writing is its reply.
-                    self.finish_step_reply(&message_id, None, aborted);
-                    self.close_unfinished_tools();
-                    self.publish(
-                        "turn.end",
-                        json!({ "turnId": message_id, "status": stop_reason }),
-                    );
-                }
-                self.cancel_pending("turn-ended");
-                *self
-                    .active_message
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
-                *self
-                    .active_client_message
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
-                *self
-                    .turn_started_at
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
-                self.cancelling.store(false, Ordering::SeqCst);
-                self.turn_running.store(false, Ordering::SeqCst);
-                self.prompt_echo.store(false, Ordering::SeqCst);
-                // Steered messages the run did not reach are taken back before
-                // anything else is sent, so the runtime cannot use them twice.
-                self.run_finished();
-                self.publish_summary();
+                self.run_settled(aborted);
             }
             PiRecord::ExtensionUiRequest => self.handle_extension_ui_request(&value),
             PiRecord::ExtensionError => {
@@ -2765,10 +2735,10 @@ impl Session {
             "options": ["Approve", "Deny"],
             "expiresAt": expires_at,
         });
-        if let Some(turn_id) = self.active_turn() {
+        if let Some(turn_id) = self.run_id() {
             data["turnId"] = Value::String(turn_id);
         }
-        if let Some(client) = self.active_client() {
+        if let Some(client) = self.run().and_then(|run| run.client) {
             data["initiatorClientId"] = Value::String(client);
         }
         let entry = PendingApproval {
@@ -2833,10 +2803,10 @@ impl Session {
             "questions": [item],
             "expiresAt": expires_at,
         });
-        if let Some(turn_id) = self.active_turn() {
+        if let Some(turn_id) = self.run_id() {
             data["turnId"] = Value::String(turn_id);
         }
-        if let Some(client) = self.active_client() {
+        if let Some(client) = self.run().and_then(|run| run.client) {
             data["initiatorClientId"] = Value::String(client);
         }
         let mut option_map = std::collections::HashMap::new();
@@ -2856,11 +2826,276 @@ impl Session {
         self.schedule_question_expiry(question_id, timeout);
     }
 
-    fn active_turn(&self) -> Option<String> {
-        self.active_message
+    fn run_guard(&self) -> std::sync::MutexGuard<'_, Option<Run>> {
+        self.run.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// The run in progress, if any.
+    fn run(&self) -> Option<Run> {
+        self.run_guard().clone()
+    }
+
+    /// The id of the run in progress: its rows and events carry it.
+    fn run_id(&self) -> Option<String> {
+        self.run_guard().as_ref().map(|run| run.id.clone())
+    }
+
+    /// The user's message that started the run in progress.
+    fn run_client_message(&self) -> Option<String> {
+        self.run_guard().as_ref().and_then(|run| run.client_message_id.clone())
+    }
+
+    /// The prompt of the run in progress has reached the runtime: it is no
+    /// longer only parked for the handshake.
+    fn run_reached_runtime(&self) -> bool {
+        self.run_guard().as_ref().is_some_and(|run| run.phase != RunPhase::Starting)
+    }
+
+    fn take_run(&self) -> Option<Run> {
+        self.run_guard().take()
+    }
+
+    /// Open a run for a user's message, before its prompt is written. What the
+    /// previous run streamed is not part of it.
+    fn open_user_run(&self, id: &str, client_message_id: &str, client: Option<String>, prompt: Value, phase: RunPhase) {
+        *self.run_guard() = Some(Run {
+            id: id.to_string(),
+            origin: RunOrigin::User,
+            phase,
+            client_message_id: Some(client_message_id.to_string()),
+            client,
+            prompt: Some(prompt),
+            started_at: Self::now_iso(),
+        });
+        self.clear_reply();
+        self.prompt_echo.store(true, Ordering::SeqCst);
+    }
+
+    fn clear_reply(&self) {
+        self.assistant_text
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()
+            .clear();
+        self.assistant_blocks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+        self.reset_step();
+    }
+
+    /// The prompt of the run in progress was written to the runtime.
+    fn run_sent(&self) {
+        if let Some(run) = self.run_guard().as_mut().filter(|run| run.phase == RunPhase::Starting) {
+            run.phase = RunPhase::Sent;
+        }
+    }
+
+    /// The runtime accepted the prompt of the run in progress. It answers before
+    /// that run's `agent_start`, so a run that starts before this answer is not it.
+    fn run_accepted(&self, client_message_id: &str) {
+        if let Some(run) = self.run_guard().as_mut().filter(|run| {
+            run.phase == RunPhase::Sent && run.client_message_id.as_deref() == Some(client_message_id)
+        }) {
+            run.phase = RunPhase::Accepted;
+        }
+    }
+
+    /// The runtime started a run (`agent_start`): the one the host's accepted
+    /// prompt asked for, or one of its own (Flow, an extension).
+    fn run_started(self: &Arc<Self>) {
+        // Waiting messages go in once the first reply starts.
+        self.replying.store(false, Ordering::SeqCst);
+        let displaced = {
+            let mut run = self.run_guard();
+            match run.as_mut() {
+                Some(current) if matches!(current.phase, RunPhase::Accepted | RunPhase::Streaming) => {
+                    current.phase = RunPhase::Streaming;
+                    current.prompt = None;
+                    None
+                }
+                _ => Some(run.take()),
+            }
+        };
+        match displaced {
+            None => {
+                self.set_status(Status::Running);
+                // The runtime runs its input handlers before the agent run exists,
+                // and an abort that lands then finds nothing to stop. The host
+                // already answered that Stop with "cancelling", so it stops this run.
+                if self.cancelling.load(Ordering::SeqCst) {
+                    let id = self.request_id();
+                    // A failed write means the runtime is gone; its exit ends the run.
+                    let _ = self.write_command(pi::command::with_id(pi::command::abort(), &id));
+                }
+            }
+            Some(mine) => {
+                if let Some(mine) = mine {
+                    self.displace_prompt(mine);
+                }
+                self.open_runtime_run();
+            }
+        }
+        self.publish_summary();
+    }
+
+    /// The runtime started a run of its own while the user's prompt waited for
+    /// it. That prompt did not start this run: it waits in the queue, and the
+    /// runtime either refuses it (it is then steered into this run) or, if this
+    /// run ends first, starts a run with it.
+    fn displace_prompt(&self, mine: Run) {
+        let Some(prompt) = mine.prompt else { return };
+        let client = mine.client_message_id.clone().unwrap_or_default();
+        // Still parked for the handshake: it never reached the runtime.
+        let prompted = mine.phase != RunPhase::Starting;
+        if !prompted {
+            self.pending_prompts
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .retain(|parked| parked.get("id").and_then(Value::as_str) != Some(client.as_str()));
+        }
+        if self.cancelling.swap(false, Ordering::SeqCst) {
+            // Stop was pressed for this message: it does not run.
+            self.tombstone(&client);
+        }
+        log(
+            &self.home,
+            "info",
+            "run.prompt_displaced",
+            json!({ "session": self.id, "turnId": mine.id, "clientMessageId": client, "prompted": prompted }),
+        );
+        self.prompt_echo.store(false, Ordering::SeqCst);
+        self.queued_turns
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push_front(Queued {
+                turn: mine.id.clone(),
+                prompt,
+                // Its row is in history already.
+                row: None,
+                steered: None,
+                no_steer: false,
+                held: false,
+                prompted,
+            });
+        self.publish("turn.end", json!({ "turnId": mine.id, "status": "queued" }));
+    }
+
+    /// A run the runtime started itself: it is the session's run like any other.
+    fn open_runtime_run(&self) {
+        let counter = self.next_message.fetch_add(1, Ordering::Relaxed) + 1;
+        let id = format!("m-{counter}");
+        *self.run_guard() = Some(Run {
+            id: id.clone(),
+            origin: RunOrigin::Runtime,
+            phase: RunPhase::Streaming,
+            client_message_id: None,
+            client: None,
+            prompt: None,
+            started_at: Self::now_iso(),
+        });
+        self.clear_reply();
+        self.prompt_echo.store(false, Ordering::SeqCst);
+        log(&self.home, "info", "run.runtime_started", json!({ "session": self.id, "turnId": id }));
+        self.publish("turn.start", json!({ "turnId": id, "phase": "running", "origin": "runtime" }));
+        self.set_status(Status::Running);
+    }
+
+    /// The runtime's run ended (`agent_settled`), whoever started it.
+    fn run_settled(self: &Arc<Self>, aborted: bool) {
+        // A prompt still waiting for its own run is not what ended.
+        let ended = self.run().filter(|run| run.phase == RunPhase::Streaming);
+        if let Some(run) = ended {
+            let stop_reason = if aborted { "interrupted" } else { "completed" };
+            // Whatever the last step had not finished writing is its reply.
+            self.finish_step_reply(&run.id, None, aborted);
+            self.close_unfinished_tools();
+            // Still the run while its end is told, so the end names its message.
+            self.publish("turn.end", json!({ "turnId": run.id, "status": stop_reason }));
+            self.take_run();
+        }
+        self.cancel_pending("turn-ended");
+        if self.run_guard().is_some() {
+            self.publish_summary();
+            return;
+        }
+        self.cancelling.store(false, Ordering::SeqCst);
+        self.prompt_echo.store(false, Ordering::SeqCst);
+        // Steered messages the run did not reach are taken back before
+        // anything else is sent, so the runtime cannot use them twice.
+        self.run_finished();
+        self.publish_summary();
+    }
+
+    /// The runtime answered a prompt a run of its own displaced (see
+    /// `displace_prompt`). Returns whether the answer was for one.
+    fn displaced_prompt_answered(self: &Arc<Self>, client_message_id: &str, value: &Value) -> bool {
+        let success = value.get("success").and_then(Value::as_bool) == Some(true);
+        let disposition = value.pointer("/data/disposition").and_then(Value::as_str);
+        let stopped = self.tombstoned(client_message_id);
+        let item = {
+            let mut queue = self
+                .queued_turns
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let Some(at) = queue
+                .iter()
+                .position(|item| item.prompted && item.client_message_id() == Some(client_message_id))
+            else {
+                return false;
+            };
+            if success || stopped {
+                queue.remove(at)
+            } else {
+                // Refused while the runtime's own run streams: it is steered into it.
+                queue[at].prompted = false;
+                None
+            }
+        };
+        log(
+            &self.home,
+            "info",
+            "run.displaced_answered",
+            json!({ "session": self.id, "clientMessageId": client_message_id, "success": success, "disposition": disposition, "stopped": stopped }),
+        );
+        match item {
+            Some(item) if success && disposition != Some("handled") => {
+                // The runtime's run ended before it took the prompt: it runs it now.
+                let busy = self.run_guard().is_some();
+                if busy {
+                    log(&self.home, "warn", "run.overlap", json!({ "session": self.id, "clientMessageId": client_message_id }));
+                }
+                self.open_user_run(&item.turn, client_message_id, None, item.prompt, RunPhase::Accepted);
+                // Stop was pressed for it: stop the run it starts.
+                self.cancelling.store(stopped, Ordering::SeqCst);
+                self.publish("turn.start", json!({ "turnId": item.turn, "phase": "running" }));
+                self.set_status(Status::Running);
+            }
+            Some(_) => {}
+            None => self.steer_queue(),
+        }
+        if self.run_guard().is_none() && self.status() == Status::Idle {
+            self.start_queued_turn();
+        }
+        self.publish_summary();
+        true
+    }
+
+    fn tombstone(&self, client_message_id: &str) {
+        let now = Instant::now();
+        let mut cancelled = self
+            .cancelled
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        cancelled.retain(|_, until| *until > now);
+        cancelled.insert(client_message_id.to_string(), now + Duration::from_secs(300));
+    }
+
+    fn tombstoned(&self, client_message_id: &str) -> bool {
+        self.cancelled
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(client_message_id)
+            .is_some_and(|until| *until > Instant::now())
     }
 
     fn schedule_approval_expiry(self: &Arc<Self>, approval_id: String, timeout: Duration) {
@@ -2919,7 +3154,7 @@ impl Session {
     }
 
     fn restore_running_status(&self) {
-        if self.active_turn().is_some() {
+        if self.run_id().is_some() {
             self.set_status(Status::Running);
         } else {
             self.set_status(Status::Idle);
@@ -3313,17 +3548,42 @@ impl Session {
                 "waiting": waiting,
             }));
         }
-        if self.active_turn().is_some() {
+        let counter = self.next_message.fetch_add(1, Ordering::Relaxed) + 1;
+        let message_id = format!("m-{counter}");
+        let images: Vec<(&str, &str)> = attachments
+            .iter()
+            .map(|attachment| (attachment.mime_type.as_str(), attachment.data.as_str()))
+            .collect();
+        let prompt = pi::command::with_id(pi::command::prompt(text, &images), client_message_id);
+        // The message starts a run only when none is in progress, whoever
+        // started that one; checked and claimed at once.
+        let opened = {
+            let mut run = self.run_guard();
+            if run.is_some() {
+                false
+            } else {
+                *run = Some(Run {
+                    id: message_id.clone(),
+                    origin: RunOrigin::User,
+                    phase: RunPhase::Starting,
+                    client_message_id: Some(client_message_id.to_string()),
+                    client: client_id.map(str::to_string),
+                    prompt: Some(prompt.clone()),
+                    started_at: Self::now_iso(),
+                });
+                true
+            }
+        };
+        if !opened {
             *self
                 .failed_turn
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
-            // A turn is already starting/running. The host owns the message, not
-            // the composer: it waits in the queue (shown above the composer) and
-            // is handed to the running turn as steer. It joins the transcript when
-            // the runtime uses it, or starts the next turn if this one ends first.
-            let counter = self.next_message.fetch_add(1, Ordering::Relaxed) + 1;
-            let message_id = format!("m-{counter}");
+            // A run is already starting/running, whoever started it. The host owns
+            // the message, not the composer: it waits in the queue (shown above the
+            // composer) and is handed to the run as steer when the run takes it
+            // (`run_takes_steer`). It joins the transcript when the runtime uses
+            // it, or starts the next run if this one ends first.
             let stored_attachments = self.store_attachments(attachments)?;
             let mut row = json!({
                 "kind": "user",
@@ -3341,12 +3601,6 @@ impl Session {
                 "message.accepted",
                 json!({ "messageId": message_id.clone(), "receipt": "queued", "waiting": true, "clientMessageId": client_message_id }),
             );
-            let images: Vec<(&str, &str)> = attachments
-                .iter()
-                .map(|attachment| (attachment.mime_type.as_str(), attachment.data.as_str()))
-                .collect();
-            let prompt =
-                pi::command::with_id(pi::command::prompt(text, &images), client_message_id);
             self.queued_turns
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -3357,6 +3611,7 @@ impl Session {
                     steered: None,
                     no_steer: false,
                     held: false,
+                    prompted: false,
                 });
             messages.insert(
                 client_message_id.to_string(),
@@ -3370,39 +3625,19 @@ impl Session {
             self.publish_summary();
             return Ok(json!({ "messageId": message_id, "receipt": "queued", "waiting": true }));
         }
-        let counter = self.next_message.fetch_add(1, Ordering::Relaxed) + 1;
-        let message_id = format!("m-{counter}");
-        *self
-            .active_message
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(message_id.clone());
-        *self
-            .active_client
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = client_id.map(str::to_string);
-        *self
-            .active_client_message
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(client_message_id.to_string());
         *self
             .failed_turn
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
-        *self
-            .turn_started_at
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Self::now_iso());
-        *self
-            .assistant_text
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = String::new();
-        self.assistant_blocks
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clear();
-        self.reset_step();
+        self.clear_reply();
         self.prompt_echo.store(true, Ordering::SeqCst);
-        let stored_attachments = self.store_attachments(attachments)?;
+        let stored_attachments = match self.store_attachments(attachments) {
+            Ok(stored) => stored,
+            Err(error) => {
+                self.take_run();
+                return Err(error);
+            }
+        };
         let mut history_row = json!({
             "kind": "user",
             "id": format!("{message_id}:user"),
@@ -3451,11 +3686,6 @@ impl Session {
             }),
         );
         self.publish_summary();
-        let images: Vec<(&str, &str)> = attachments
-            .iter()
-            .map(|attachment| (attachment.mime_type.as_str(), attachment.data.as_str()))
-            .collect();
-        let prompt = pi::command::with_id(pi::command::prompt(text, &images), client_message_id);
         if matches!(self.status(), Status::Pending) {
             self.set_status(Status::Starting);
             self.start(true);
@@ -3476,6 +3706,7 @@ impl Session {
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .push(prompt);
         } else {
+            self.run_sent();
             self.set_status(Status::Running);
             let result = self.write_command(prompt);
             if let Err(error) = result {
@@ -3496,12 +3727,7 @@ impl Session {
     }
 
     pub fn cancel_message(&self, client_message_id: &str) -> Result<Value, ApiError> {
-        let active = self
-            .active_client_message
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone();
-        if active.as_deref() == Some(client_message_id) {
+        if self.run_client_message().as_deref() == Some(client_message_id) {
             match self.status() {
                 Status::Running | Status::WaitingApproval | Status::WaitingQuestion => {
                     self.cancelling.store(true, Ordering::SeqCst);
@@ -3525,6 +3751,13 @@ impl Session {
             let at = queue
                 .iter()
                 .position(|item| item.client_message_id() == Some(client_message_id));
+            if at.is_some_and(|at| queue[at].prompted) {
+                // The runtime has it as a prompt and has not answered: it is
+                // stopped when the runtime answers (`displaced_prompt_answered`).
+                drop(queue);
+                self.tombstone(client_message_id);
+                return Ok(json!({ "status": "cancelling" }));
+            }
             if at.is_some_and(|at| queue[at].held) {
                 // Flow has it and will deliver it; removing it here would not stop that.
                 return Err(ApiError::new(
@@ -3563,7 +3796,7 @@ impl Session {
         // Do not write a queued prompt until the replacement runtime has completed
         // its handshake. A Recovering session starts the queue from the handshake
         // path, not from this command.
-        let started = if self.status() == Status::Idle && self.active_turn().is_none() {
+        let started = if self.status() == Status::Idle && self.run_id().is_none() {
             self.start_queued_turn()
         } else {
             self.steer_queue();
@@ -3603,9 +3836,9 @@ impl Session {
         self.queued_turns
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .push_front(Queued { turn, prompt, row: None, steered: None, no_steer: true, held: false });
+            .push_front(Queued { turn, prompt, row: None, steered: None, no_steer: true, held: false, prompted: false });
         self.queue_paused.store(false, Ordering::SeqCst);
-        if self.active_turn().is_none() {
+        if self.run_id().is_none() {
             self.start_queued_turn();
         }
         self.publish_summary();
@@ -3644,12 +3877,15 @@ impl Session {
                 .drain(..)
                 .count();
             if removed > 0 {
-                let turn = self
-                    .active_message
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .take()
-                    .unwrap_or_default();
+                let turn = {
+                    let mut run = self.run_guard();
+                    if run.as_ref().is_some_and(|run| run.phase == RunPhase::Starting) {
+                        run.take().map(|run| run.id)
+                    } else {
+                        None
+                    }
+                }
+                .unwrap_or_default();
                 self.publish(
                     "turn.end",
                     json!({ "turnId": turn, "aborted": true, "phase": "starting" }),
@@ -4064,7 +4300,9 @@ impl Session {
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .clone(),
             "status": self.status().as_str(),
-            "running": self.status() == Status::Running,
+            // Busy while a run is in progress, whoever started it (also while
+            // it waits for an approval or an answer).
+            "running": self.run_guard().is_some(),
             "activeTurn": self.active_turn_view(self.status()),
             "runtimePid": self.runtime_pid(),
             "model": self
@@ -4083,36 +4321,25 @@ impl Session {
 
     /// The turn in progress, as the session list and the session detail both show it.
     fn active_turn_view(&self, status: Status) -> Option<Value> {
-        self.active_message
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()
-            .map(|turn| {
-                let phase = if self.cancelling.load(Ordering::Relaxed) {
-                    "cancelling"
-                } else {
-                    match status {
-                        Status::Pending | Status::Starting | Status::Recovering => "starting",
-                        Status::Running | Status::WaitingApproval | Status::WaitingQuestion => "running",
-                        _ => "accepted",
-                    }
-                };
-                json!({
-                    "turnId": turn,
-                    "clientMessageId": self
-                        .active_client_message
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner())
-                        .clone(),
-                    "phase": phase,
-                    "step": self.step_view(),
-                    "startedAt": self
-                        .turn_started_at
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner())
-                        .clone(),
-                })
+        self.run().map(|run| {
+            let phase = if self.cancelling.load(Ordering::Relaxed) {
+                "cancelling"
+            } else {
+                match status {
+                    Status::Pending | Status::Starting | Status::Recovering => "starting",
+                    Status::Running | Status::WaitingApproval | Status::WaitingQuestion => "running",
+                    _ => "accepted",
+                }
+            };
+            json!({
+                "turnId": run.id,
+                "origin": run.origin.as_str(),
+                "clientMessageId": run.client_message_id,
+                "phase": phase,
+                "step": self.step_view(),
+                "startedAt": run.started_at,
             })
+        })
     }
 
     pub fn summary(&self) -> Value {
@@ -4129,7 +4356,7 @@ impl Session {
                     "clientMessageId": item.client_message_id(),
                     "text": item.text(),
                     "images": item.prompt.get("images").and_then(Value::as_array).map_or(0, Vec::len),
-                    "state": if item.held { "held" } else if self.queue_paused.load(Ordering::Relaxed) { "paused" } else { "queued" },
+                    "state": if item.prompted { "delivering" } else if item.held { "held" } else if self.queue_paused.load(Ordering::Relaxed) { "paused" } else { "queued" },
                 })
             })
             .collect();
@@ -4232,11 +4459,8 @@ impl Session {
             pending_prompts: Mutex::new(Vec::new()),
             next_message: AtomicU64::new(0),
             next_request: AtomicU64::new(0),
-            active_message: Mutex::new(None),
-            active_client_message: Mutex::new(None),
-            turn_started_at: Mutex::new(None),
+            run: Mutex::new(None),
             cancelling: AtomicBool::new(false),
-            turn_running: AtomicBool::new(false),
             release_flow_hold: AtomicBool::new(false),
             commands: Mutex::new(Vec::new()),
             cancelled: Mutex::new(HashMap::new()),
@@ -4261,7 +4485,6 @@ impl Session {
             assistant_text: Mutex::new(String::new()),
             assistant_blocks: Mutex::new(Vec::new()),
             step: Mutex::new(StepState::new()),
-            active_client: Mutex::new(None),
             model: Mutex::new(None),
             pending_model: Mutex::new(None),
             pending_model_request: Mutex::new(None),
@@ -4301,7 +4524,7 @@ impl Session {
     /// sending. It keeps no runtime once no client shows it.
     fn untouched(&self) -> bool {
         self.fresh.load(Ordering::SeqCst)
-            && self.active_turn().is_none()
+            && self.run_id().is_none()
             && self
                 .history
                 .lock()
@@ -4589,6 +4812,7 @@ impl Session {
         {
             item.steered = None;
             item.held = false;
+            item.prompted = false;
         }
         self.end_active_turn(json!({ "status": "failed", "reason": code }));
         self.cancel_pending(code);
@@ -4612,29 +4836,12 @@ impl Session {
     /// End the turn in progress, whatever stage it reached, without a run
     /// ending it. A reply cut off mid-stream keeps what arrived.
     fn end_active_turn(&self, outcome: Value) {
-        let turn = self
-            .active_message
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take();
+        let turn = self.take_run().map(|run| run.id);
         if let Some(turn) = turn.as_deref() {
             self.finish_step_reply(turn, None, true);
             self.close_unfinished_tools();
         }
-        *self
-            .active_client_message
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
-        *self
-            .turn_started_at
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
-        *self
-            .active_client
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
         self.cancelling.store(false, Ordering::SeqCst);
-        self.turn_running.store(false, Ordering::SeqCst);
         self.prompt_echo.store(false, Ordering::SeqCst);
         if let Some(turn) = turn {
             let mut data = json!({ "turnId": turn });
@@ -4652,7 +4859,8 @@ impl Session {
     }
 
     fn start_queued_turn(self: &Arc<Self>) -> bool {
-        if self.queue_paused.load(Ordering::Relaxed) {
+        // One run at a time, whoever started the one in progress.
+        if self.queue_paused.load(Ordering::Relaxed) || self.run_guard().is_some() {
             return false;
         }
         let Some(item) = ({
@@ -4660,8 +4868,9 @@ impl Session {
                 .queued_turns
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            // A held message is its extension's to release; sending it too would send it twice.
-            queue.iter().position(|item| !item.held).and_then(|at| queue.remove(at))
+            // A held message is its extension's to release, and a displaced prompt
+            // waits for the runtime's answer; sending either would send it twice.
+            queue.iter().position(|item| !item.held && !item.prompted).and_then(|at| queue.remove(at))
         }) else {
             return false;
         };
@@ -4669,29 +4878,8 @@ impl Session {
         if let Some(row) = row.clone() {
             self.deliver_user_row(row, &turn);
         }
-        *self
-            .active_message
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(turn.clone());
-        *self
-            .active_client_message
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
-            Some(prompt.get("id").and_then(Value::as_str).unwrap_or_default().to_string());
-        *self
-            .turn_started_at
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Self::now_iso());
-        *self
-            .assistant_text
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = String::new();
-        self.assistant_blocks
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clear();
-        self.reset_step();
-        self.prompt_echo.store(true, Ordering::SeqCst);
+        let client_message_id = prompt.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
+        self.open_user_run(&turn, &client_message_id, None, prompt.clone(), RunPhase::Sent);
         self.publish(
             "turn.start",
             json!({ "turnId": turn, "phase": "running" }),
@@ -4702,11 +4890,8 @@ impl Session {
             self.queued_turns
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .push_front(Queued { turn: turn.clone(), prompt, row: None, steered: None, no_steer: true, held: false });
-            *self
-                .active_message
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+                .push_front(Queued { turn: turn.clone(), prompt, row: None, steered: None, no_steer: true, held: false, prompted: false });
+            self.take_run();
             self.fail(error.code, &error.message, error.retryable);
         }
         true
@@ -4722,6 +4907,7 @@ impl Session {
         if prompts.is_empty() {
             return;
         }
+        self.run_sent();
         self.set_status(Status::Running);
         for prompt in prompts {
             if let Err(error) = self.write_command(prompt) {
@@ -4779,7 +4965,7 @@ impl Session {
                 self.commands.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clear();
                 if !matches!(self.status(), Status::Stopped) {
                     let status = self.status();
-                    let finalize = self.turn_running.load(Ordering::SeqCst)
+                    let finalize = self.run_reached_runtime()
                         || matches!(
                             status,
                             Status::Running
@@ -4788,20 +4974,13 @@ impl Session {
                         );
                     if finalize {
                         self.release_flow_hold.store(true, Ordering::SeqCst);
-                        let turn = self
-                            .active_message
-                            .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner())
-                            .take();
+                        let run = self.take_run();
+                        let turn = run.as_ref().map(|run| run.id.clone());
                         if let Some(turn) = turn.clone() {
                             self.finish_step_reply(&turn, None, true);
                             self.close_unfinished_tools();
                         }
-                        let client_id = self
-                            .active_client_message
-                            .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner())
-                            .clone();
+                        let client_id = run.and_then(|run| run.client_message_id);
                         let failed_text = client_id.as_deref().and_then(|id| {
                             self.messages
                                 .lock()
@@ -4816,21 +4995,8 @@ impl Session {
                                 .unwrap_or_else(|poisoned| poisoned.into_inner()) =
                                 Some(json!({ "clientMessageId": id, "text": failed_text.unwrap_or_default() }));
                         }
-                        *self
-                            .active_client_message
-                            .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
-                        *self
-                            .turn_started_at
-                            .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
                         self.cancelling.store(false, Ordering::SeqCst);
-                        self.turn_running.store(false, Ordering::SeqCst);
                         self.cancel_pending("runtime-exited");
-                        *self
-                            .active_client
-                            .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
                         self.queue_paused.store(true, Ordering::SeqCst);
                         self.prompt_echo.store(false, Ordering::SeqCst);
                         self.steers_in_flight.store(0, Ordering::SeqCst);
@@ -4843,9 +5009,11 @@ impl Session {
                             .iter_mut()
                         {
                             item.steered = None;
-                            // Whatever an extension held went down with the runtime too;
-                            // the paused queue gives it back to the user.
+                            // Whatever an extension held, or a prompt the runtime had not
+                            // answered, went down with the runtime too; the paused queue
+                            // gives it back to the user.
                             item.held = false;
+                            item.prompted = false;
                         }
                         if let Some(turn) = turn {
                             self.publish(

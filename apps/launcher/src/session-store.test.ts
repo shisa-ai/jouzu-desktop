@@ -179,6 +179,26 @@ describe("SessionStore", () => {
     expect(store.snapshot.projection.messages.map(message => `${message.role}:${message.turnId}`)).toEqual(["user:m-1"]);
   });
 
+  it("shows a run the runtime started as running, and Stop interrupts it", async () => {
+    const session = fakeSession();
+    const calls: string[] = [];
+    session.interrupt = async () => { calls.push("interrupt"); };
+    session.cancel = async (id: string) => { calls.push(`cancel:${id}`); };
+    const store = SessionStore.attach(session);
+    session.emit(event(1, "session.updated", { status: "running", activeTurn: { turnId: "m-4", origin: "runtime", clientMessageId: null, phase: "running" }, queue: [] }));
+    expect(store.running).toBe(true);
+    expect(store.snapshot.activeTurn).toMatchObject({ turnId: "m-4", origin: "runtime" });
+    await store.stop();
+    expect(calls).toEqual(["interrupt"]);
+    // Stopping is the host's to report; the window does not guess it.
+    expect(store.snapshot.activeTurn?.phase).toBe("running");
+    session.emit(event(2, "session.updated", { status: "running", activeTurn: { turnId: "m-4", origin: "runtime", phase: "cancelling" }, queue: [] }));
+    expect(store.snapshot.activeTurn?.phase).toBe("cancelling");
+    session.emit(event(3, "session.updated", { status: "idle", activeTurn: null, queue: [{ clientMessageId: "c-2", text: "two", state: "paused", images: 0 }] }));
+    expect(store.running).toBe(false);
+    expect(store.snapshot.queue).toEqual([{ clientMessageId: "c-2", text: "two", state: "paused", images: 0 }]);
+  });
+
   it("puts the message back when Stop does not reach the host", async () => {
     let release: () => void = () => {};
     const session = fakeSession();

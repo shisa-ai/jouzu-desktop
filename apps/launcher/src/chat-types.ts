@@ -53,6 +53,8 @@ export interface TurnStep {
 }
 export interface ActiveTurn {
   turnId: string;
+  /** Who started the run: a message the user sent, or the runtime itself (Flow). */
+  origin?: "user" | "runtime";
   clientMessageId?: string;
   phase: string;
   startedAt?: number;

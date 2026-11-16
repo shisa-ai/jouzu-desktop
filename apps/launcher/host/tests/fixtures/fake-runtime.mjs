@@ -250,18 +250,51 @@ function prompt(id, text, images) {
   promptLog(text);
   // "EXTERR <text>" first reports an extension failure, like a real extension would.
   if (String(text).startsWith("EXTERR ")) out({ type: "extension_error", extensionPath: "fake", event: "turn_start", error: String(text).slice(7) });
-  busy = true;
-  interrupted = false;
-  response(id, "prompt", { disposition: "started" });
   // Like the runtime: prompt() awaits the extensions' input handlers before the
-  // agent run exists, and an abort that lands in that window finds no run.
+  // agent run exists, and an abort that lands in that window finds no run. It
+  // answers only after them: refused if a run started meanwhile, else "started"
+  // just before that run's agent_start.
+  const proceed = () => {
+    inputPhase = false;
+    if (busy) {
+      failure(id, "prompt", "Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.");
+      return;
+    }
+    busy = true;
+    interrupted = false;
+    response(id, "prompt", { disposition: "started" });
+    run(String(text), images);
+  };
   const inputDelay = Number(process.env.FAKE_RUNTIME_INPUT_DELAY_MS ?? 0);
   if (inputDelay > 0) {
     inputPhase = true;
-    setTimeout(() => { inputPhase = false; run(String(text), images); }, inputDelay);
+    selfRunWhen("prompt");
+    setTimeout(proceed, inputDelay);
     return;
   }
-  run(String(text), images);
+  proceed();
+}
+
+// Like Flow: the runtime starts a run of its own, with no prompt from the host.
+// FAKE_RUNTIME_SELF_RUN names when (once): "ready" (after the session opened),
+// "stop" (right after an aborted run settles), "prompt" (while a prompt is in
+// its input handlers). Its reply is FAKE_RUNTIME_SELF_RUN_TEXT.
+const selfRunAt = process.env.FAKE_RUNTIME_SELF_RUN ?? "";
+let selfRunDone = false;
+function selfRunWhen(moment) {
+  if (selfRunAt !== moment || selfRunDone) return;
+  selfRunDone = true;
+  const start = () => {
+    if (busy) return;
+    busy = true;
+    interrupted = false;
+    out({ type: "agent_start" });
+    out({ type: "turn_start" });
+    out({ type: "message_start", message: { role: "assistant", content: [] } });
+    beginTurn(process.env.FAKE_RUNTIME_SELF_RUN_TEXT ?? "flow continues its task list");
+  };
+  if (moment === "prompt") start();
+  else setTimeout(start, 20);
 }
 
 function run(text, images) {
@@ -333,6 +366,7 @@ lines.on("line", line => {
       break;
     case "get_state":
       response(value.id, "get_state", { sessionId: "fixture", isStreaming: busy, model: currentModel, thinkingLevel: "off", sessionFile: null });
+      selfRunWhen("ready");
       break;
     case "get_available_models":
       response(value.id, "get_available_models", { models: [] });
@@ -370,7 +404,7 @@ lines.on("line", line => {
       response(value.id, "switch_session", { cancelled: false });
       break;
     case "prompt":
-      if (busy) {
+      if (busy || inputPhase) {
         failure(value.id, "prompt", "prompt while busy");
         break;
       }
@@ -417,6 +451,7 @@ lines.on("line", line => {
         interrupted = true;
         if (current) clearTimeout(timer);
         settled(true);
+        selfRunWhen("stop");
       }
       break;
     default:
