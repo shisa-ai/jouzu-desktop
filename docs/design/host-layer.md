@@ -80,8 +80,9 @@ describes no screens; what a person sees is in the UI document.
 - A new session starts its runtime when it is created (a warm one when ready):
   nothing can be sent until that runtime reports a model.
 - The model facts come from the session's own state requests (the handshake's
-  `get_state`, and one after each slash command, since the runtime reports no
-  model change on its own: runtime G-row). The liveness probe's answers say only
+  `get_state`) and the replies to its own model commands. A model change the
+  runtime makes on its own (a slash command) is not reported in RPC mode; the
+  host does not work around that (runtime G3). The liveness probe's answers say only
   that the runtime lives. A new runtime for the session (recovery) makes the
   model `resolving` again until it answers. Queued and retried turns wait for
   `ready` like a send.

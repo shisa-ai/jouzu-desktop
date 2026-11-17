@@ -56,7 +56,7 @@ None of these is fixed in the desktop.
 | Whether Flow still starts runs on its own after Stop | Part of the Flow design; waits on jouzu#57–#62 |
 | G1: RPC mode starts like interactive mode: restore the last-used model, apply the catalog default, run the background catalog refresh | To file |
 | G2: an RPC `reload` command (catalogs and credentials changed while a session runs) | To file |
-| G3: an RPC event when the session's model changes | To file |
+| G3: an RPC event when the session's model or session file changes on the runtime's own (a slash command, an extension) | To file |
 | G4: a structured result when a restored model is unavailable and another is used | To file |
 | G5: a supported configuration interface (sign-in, keys, providers, catalogs, default model, language) | To file |
 | G6: structured provider error codes (same as the row above) | To file |
