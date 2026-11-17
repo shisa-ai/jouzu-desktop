@@ -1882,9 +1882,6 @@ impl Session {
         if let Some(mut done) = self.command_answered(response_id) {
             done["success"] = value.get("success").cloned().unwrap_or(Value::Null);
             self.publish("session.command_done", done);
-            // A command can change the model or level, and the runtime does not
-            // report that on its own: ask it once the command is done.
-            self.request_state();
         }
         if response_id == FLOW_RELEASE_ID {
             log(
