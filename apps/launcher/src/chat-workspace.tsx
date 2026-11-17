@@ -61,8 +61,6 @@ export interface ChatWorkspaceProps {
   onBusyChange?: (busy: boolean) => void;
   onBootChange?: (booting: boolean, warm: WarmView, retryWarm: () => void) => void;
   catalogRefreshing?: boolean;
-  canRefreshModels?: boolean;
-  onModelsMissing?: () => void;
   workspaces: readonly WorkspaceItem[];
   onSelect: (path: string) => void;
   onAddFolder: () => void;
@@ -113,7 +111,7 @@ async function chooseEntry(api: JouzuApi, workspace: string): Promise<string | n
   return latest?.sessionPath ?? null;
 }
 
-export function ChatWorkspace({ path, revision = 0, newSession = true, locked = false, onStartSession, onRetry, onBusyChange, onBootChange, catalogRefreshing = false, canRefreshModels = false, onModelsMissing, workspaces, onSelect, onAddFolder, onRemove, folderNotice, onSettings, onUpdate, updateAvailable = false, updateBusy = false }: ChatWorkspaceProps) {
+export function ChatWorkspace({ path, revision = 0, newSession = true, locked = false, onStartSession, onRetry, onBusyChange, onBootChange, catalogRefreshing = false, workspaces, onSelect, onAddFolder, onRemove, folderNotice, onSettings, onUpdate, updateAvailable = false, updateBusy = false }: ChatWorkspaceProps) {
   const api = useApi();
   // The host starts this workspace's runtime ahead of need; loading waits for it.
   const [warm, retryWarm] = useWarmRuntime(api.runtime, path);
@@ -333,22 +331,29 @@ export function ChatWorkspace({ path, revision = 0, newSession = true, locked = 
     let settled = false;
     void (async () => {
       try {
-        const [leased, entry] = await Promise.all([
-          chatPool.lease(path),
-          choosing ? chooseEntry(api, path).catch(() => null) : Promise.resolve(null),
-        ]);
+        // The conversation to reopen is chosen first and opened directly: a
+        // blank session leased only to be closed again would take this
+        // folder's warm runtime and kill it.
+        const entry = choosing ? await chooseEntry(api, path).catch(() => null) : null;
+        if (disposed) return;
+        const reopen = entry && !selectedSessionRef.current && !queuedSwitch.current ? entry : null;
+        // A conversation that cannot be opened here is left to the switch,
+        // which reports and retries it like a sidebar click.
+        const opened = reopen ? await chatPool.lease(path, reopen).catch(() => null) : null;
+        const leased = opened ?? await chatPool.lease(path);
         if (disposed) { void leased.close().catch(() => {}); return; }
         settled = true;
         client = leased;
-        // Queue the entry before the connection reports ready: the queued switch
-        // runs as soon as it does.
-        if (entry && !selectedSessionRef.current && !queuedSwitch.current) {
-          entryTarget.current = entry;
+        if (reopen) {
+          entryTarget.current = reopen;
           setEntryExisting(true);
-          queuedSwitch.current = entry;
-          selectedSessionRef.current = entry;
-          setSelectedSession(entry);
+          selectedSessionRef.current = reopen;
+          setSelectedSession(reopen);
           setHero(false);
+          // Opened: the entry ends when its runtime is attached. Not opened: the
+          // queued switch runs as soon as the connection reports ready.
+          if (opened) setEntryAttaching(true);
+          else queuedSwitch.current = reopen;
         } else if (choosing) setEntryOpening(false);
         bindClient(leased);
       } catch (error) {
@@ -450,9 +455,6 @@ export function ChatWorkspace({ path, revision = 0, newSession = true, locked = 
     if (!snapshot.projection.messages.length && current.projection.messages.length) return;
     setPreview({ path: current.path, projection: snapshot.projection });
   }, [snapshot.sessionFile, snapshot.projection]);
-  useEffect(() => {
-    if (snapshot.connected && snapshot.modelState === "none" && (snapshot.models?.length ?? 0) === 0 && canRefreshModels) onModelsMissing?.();
-  }, [snapshot.connected, snapshot.models, snapshot.modelState, canRefreshModels, onModelsMissing]);
   // Approvals and questions are host state; the first one waiting is shown.
   const prompt: PendingPrompt | null = snapshot.prompts?.[0] ?? null;
   useEffect(() => { setAnswer(""); setPromptError(null); setPromptBusy(false); }, [prompt?.id]);
@@ -673,8 +675,12 @@ export function ChatWorkspace({ path, revision = 0, newSession = true, locked = 
       if (!ready || !await ensureSelectedSession(ready)) { tell("The session is still opening. Your message was not sent; it is still in the composer."); return; }
       const client = connection.current;
       if (!client || sendCancelRef.current) return;
-      // Send is offered only with the runtime's model; nothing waits for one here.
-      if (client.snapshot.modelState !== "ready") return;
+      // A conversation opened by this send (a preview) has a runtime only now:
+      // until it reports a model nothing is sent, and the user is told so.
+      if (client.snapshot.modelState !== "ready") {
+        tell(client.snapshot.modelState === "none" ? "This session has no model. Your message was not sent; it is still in the composer." : "The session's model is still loading. Your message was not sent; it is still in the composer.");
+        return;
+      }
       // The notice above the composer already says Flow history is full, with the way out.
       if (isFlowHistoryError(client.snapshot.error)) return;
       const receipt = client.send(value, submitted.map(item => item.image));

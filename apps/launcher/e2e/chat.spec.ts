@@ -61,7 +61,7 @@ test("the last workspace opens and prewarms chat without a workspace click", asy
       invoke: async (command: string, args: any) => {
         w.chatCalls.push(command);
         if (command === "launcher_state") return { ready: true, bash: true, bundled_git: true, platform: "windows", recent: [{ id: "work", path: "C:/Projects/Example", environment: { kind: "windows" } }] };
-        if (command === "control_request") return { schemaVersion: 1, modelReady: true, profile: "core", account: { signedIn: false }, credentials: [], customProviders: [], providers: [], models: [] };
+        if (command === "control_request") return { schemaVersion: 1, modelReady: true, profile: "core", account: { signedIn: false }, credentials: [], customProviders: [], providers: [] };
         if (command === "component_versions") return { jouzu: "0.3.8", development: true };
         if (command === "chat_sessions") return [];
         if (command === "chat_flow_reports") return [{ kind: "work", text: JSON.stringify({ kind: "work", content: "Resume flow" }) }];

@@ -521,14 +521,15 @@ describe("SessionStore", () => {
       const feed = (target: SessionStore, value: ApiEvent) => (target as unknown as { handle: (event: ApiEvent) => void }).handle(value);
       const ready = (models: Array<{ provider: string; id: string }>) => ({ model: { provider: "p", id: "runtime-pick", name: "Runtime pick", state: "ready" }, models: models.map(model => ({ ...model, name: model.id })) });
       // Not offered by this runtime: the runtime's model stays, the memory is kept.
-      const first = fakeSession();
-      const store = SessionStore.attach(first, undefined, api as never);
+      // The host gives a new conversation its file at creation too.
+      const first = { ...fakeSession(), sessionPath: "/new-1.jsonl" };
+      const store = SessionStore.attach(first, undefined, api as never, true);
       feed(store, event(1, "session.updated", ready([{ provider: "p", id: "runtime-pick" }])));
       expect(selected).toEqual([]);
       expect(stored.get("jouzu.chat.model")).toContain("remembered");
       // Offered: switched to once, while resolving nothing is asked.
-      const second = fakeSession();
-      const next = SessionStore.attach(second, undefined, api as never);
+      const second = { ...fakeSession(), sessionPath: "/new-2.jsonl" };
+      const next = SessionStore.attach(second, undefined, api as never, true);
       feed(next, event(1, "session.updated", { model: { state: "resolving" }, models: [] }));
       expect(selected).toEqual([]);
       feed(next, event(2, "session.updated", ready([{ provider: "p", id: "runtime-pick" }, { provider: "p", id: "remembered" }])));

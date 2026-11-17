@@ -746,8 +746,8 @@ async fn select_session_thinking(
     Json(request): Json<SessionThinkingRequest>,
 ) -> Result<Json<Value>, ApiError> {
     let session = state.sessions.get(&id).ok_or_else(session_not_found)?;
-    session.select_thinking(&request.level).await?;
-    Ok(Json(json!({ "level": request.level })))
+    // The runtime may clamp the level: the session reports the one it set.
+    Ok(Json(session.select_thinking(&request.level).await?))
 }
 
 /// Usage counters for the status line. A session without a runtime yet has no
@@ -1421,7 +1421,7 @@ async fn models(State(state): State<AppState>) -> Result<Json<Value>, ApiError> 
         None => Err(ApiError::new(
             StatusCode::SERVICE_UNAVAILABLE,
             "models-unavailable",
-            "No runtime is running yet",
+            "The runtime is not ready yet",
             true,
         )),
     }
@@ -4567,7 +4567,15 @@ mod session_tests {
         )
         .await;
         assert_eq!(thinking.0, StatusCode::OK, "{}", thinking.2);
-        assert!(thinking.2.contains("\"high\""), "{}", thinking.2);
+        // The level in effect is the one the runtime reports, not an echo.
+        assert!(!thinking.2.contains("\"high\""), "{}", thinking.2);
+        for _ in 0..100 {
+            if session.summary()["thinkingLevel"] == "high" {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(session.summary()["thinkingLevel"], "high");
     }
 
     #[tokio::test]
@@ -4716,21 +4724,40 @@ mod session_tests {
     }
 
     #[tokio::test]
-    async fn the_model_list_endpoint_relays_a_running_runtime() {
+    async fn the_model_list_endpoint_relays_the_warm_runtime() {
         let (manager, _home, workspace) = manager(50);
         let app = app(manager.clone());
-        let none = call(app.clone(), request(Method::GET, "/v1/models").body(Body::empty()).unwrap()).await;
-        assert_eq!(none.0, StatusCode::SERVICE_UNAVAILABLE, "{}", none.2);
+        // A session's runtime may predate a settings change: it is never asked.
         let session = manager
             .create(workspace.path().to_str().unwrap(), None, None)
             .unwrap();
         wait_status(&session, Status::Idle).await;
+        let none = call(app.clone(), request(Method::GET, "/v1/models").body(Body::empty()).unwrap()).await;
+        assert_eq!(none.0, StatusCode::SERVICE_UNAVAILABLE, "{}", none.2);
+        let pool = manager.enable_warm_runtime().expect("warm pool");
+        pool.aim(&std::fs::canonicalize(workspace.path()).unwrap());
+        pool.wait_settled(Duration::from_secs(10)).await;
         let listed = call(app, request(Method::GET, "/v1/models").body(Body::empty()).unwrap()).await;
         assert_eq!(listed.0, StatusCode::OK, "{}", listed.2);
         let body: Value = serde_json::from_str(&listed.2).unwrap();
         assert_eq!(body["models"][0]["id"], "model", "{body}");
         assert_eq!(body["models"][1]["id"], "other", "{body}");
         manager.stop_all();
+    }
+
+    #[tokio::test]
+    async fn a_new_session_no_client_ever_showed_follows_the_idle_rule() {
+        // An API caller without an event stream: its new session keeps its
+        // runtime for the idle time, not only until the next reaper pass.
+        let (manager, _home, workspace) = manager(50);
+        let session = manager
+            .create(workspace.path().to_str().unwrap(), None, None)
+            .unwrap();
+        wait_model_state(&session, "ready").await;
+        manager.reap_idle(IdleLimits::all(Duration::from_secs(3600)));
+        assert!(manager.get(&session.id).is_some());
+        manager.reap_idle(IdleLimits::all(Duration::ZERO));
+        assert!(manager.get(&session.id).is_none());
     }
 
     #[tokio::test]

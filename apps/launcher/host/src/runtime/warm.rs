@@ -635,18 +635,6 @@ impl WarmPool {
         self.fill();
     }
 
-    /// A runtime for `workspace` has answered and waits unused: taking it costs
-    /// only the switch to a session file, never a start.
-    pub fn ready_for(&self, workspace: &Path) -> bool {
-        self.lock().slots.iter().any(|slot| {
-            slot.ready_ms.is_some()
-                && slot
-                    .workspace
-                    .as_deref()
-                    .is_some_and(|warm| same_folder(warm, workspace))
-        })
-    }
-
     /// A started runtime nobody has taken yet, to ask about itself (the models
     /// it registered) without attaching it to a session.
     pub fn ready_runtime(&self) -> Option<Arc<RuntimeSupervisor>> {

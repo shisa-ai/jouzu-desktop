@@ -246,7 +246,11 @@ export class SessionStore {
   private constructor(
     readonly session: SessionPort,
     private readonly onDispose?: () => void,
+    api?: JouzuApi,
+    /** A new conversation (not a saved one): the remembered model applies to it. */
+    private readonly fresh = false,
   ) {
+    this.api = api;
     // The file is known from the attach: a send right after opening a saved
     // session must see it is in that session, not wait for the first event.
     this.state = { ...this.state, sessionId: session.id, connected: true, ...(session.sessionPath ? { sessionFile: session.sessionPath } : {}) };
@@ -260,14 +264,13 @@ export class SessionStore {
 
   static async open(api: JouzuApi, workspacePath: string, sessionPath?: string): Promise<SessionStore> {
     const session = await HostChatSession.open(api, workspacePath, sessionPath);
-    const store = SessionStore.attach(session, undefined, api);
+    const store = SessionStore.attach(session, undefined, api, sessionPath === undefined);
     await store.load();
     return store;
   }
 
-  static attach(session: SessionPort, onDispose?: () => void, api?: JouzuApi): SessionStore {
-    const store = new SessionStore(session, onDispose);
-    store.api = api;
+  static attach(session: SessionPort, onDispose?: () => void, api?: JouzuApi, fresh = false): SessionStore {
+    const store = new SessionStore(session, onDispose, api, fresh);
     if (api) {
       store.resume();
     } else {
@@ -669,9 +672,8 @@ export class SessionStore {
    */
   private applyPreferredModel(): void {
     const preferred = this.preferred;
-    if (!preferred || this.preferenceTried) return;
     // Only a new conversation: a saved one keeps the model the runtime restored.
-    if (this.session.sessionPath) { this.preferenceTried = true; return; }
+    if (!preferred || !this.fresh || !this.api || this.preferenceTried) return;
     if (this.state.modelState !== "ready" || !this.state.models?.length) return;
     this.preferenceTried = true;
     if (this.state.modelProvider === preferred.provider && this.state.modelId === preferred.id) return;

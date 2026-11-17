@@ -1,13 +1,11 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-// Regression check for #99: the first new session after the host starts gets the
-// default model. At startup the UI creates the session before the model list is
-// known, so the host had no default to give it, and nothing else ever did.
+// Regression check for #99: the first new session after the host starts shows a
+// model. Its model is the one its runtime reports (the host keeps no default of
+// its own), so the session goes from "resolving" to "ready" without anything sent.
 // Against a host JUST started on a throwaway home (JOUZU_E2E_HOST_HOME: the host's
-// --home, with a usable default model) and before any client listed the models:
-// create a new session, list the models, then read the session: it must have the
-// default model, with nothing sent. Never touches the user's data folder.
+// --home, with a usable default model). Never touches the user's data folder.
 const hostHome = process.env.JOUZU_E2E_HOST_HOME;
 const workspace = process.env.JOUZU_E2E_WORKSPACE;
 if (!hostHome || !workspace) {
@@ -27,19 +25,16 @@ const results = [];
 const check = (name, ok, detail) => { results.push({ name, ok: !!ok, detail }); };
 
 const created = await call('/v1/sessions', { workspacePath: workspace });
-const atCreate = created.model ?? null;
-const list = await call('/v1/models');
-const expected = list.defaultProvider && list.defaultModel ? `${list.defaultProvider}/${list.defaultModel}` : null;
-let shown = null;
-for (let attempt = 0; attempt < 20 && !shown; attempt += 1) {
-  const info = await call(`/v1/sessions/${created.sessionId}`);
-  shown = info.model?.provider && info.model?.id ? `${info.model.provider}/${info.model.id}` : null;
-  if (!shown) await new Promise(resolve => setTimeout(resolve, 250));
+const atCreate = created.model?.state ?? 'none';
+let model = created.model ?? {};
+for (let attempt = 0; attempt < 120 && model.state === 'resolving'; attempt += 1) {
+  await new Promise(resolve => setTimeout(resolve, 250));
+  model = (await call(`/v1/sessions/${created.sessionId}`)).model ?? {};
 }
 check(
-  'a session created before the model list has the default once it is listed',
-  expected && shown === expected,
-  `at create: ${atCreate ? `${atCreate.provider}/${atCreate.id}` : 'none'} | default: ${expected ?? 'none'} | shown: ${shown ?? 'none'}`,
+  'a new session shows the model its runtime reports',
+  model.state === 'ready' && model.provider && model.id,
+  `at create: ${atCreate} | now: ${model.state ?? 'none'} ${model.provider ?? ''}/${model.id ?? ''}`,
 );
 
 writeFileSync('first-session-model-result.json', `${JSON.stringify({ results }, null, 2)}\n`);

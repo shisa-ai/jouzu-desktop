@@ -96,10 +96,9 @@ $env:JOUZU_E2E_WORKSPACE = '<workspace folder>'
 node e2e-runtime/first-session-model.mjs
 ```
 
-Needs a model-ready throwaway home and a host that no client has asked for models yet. Creates a
-new session first, the order of the first app start, then lists the models: the session must
-show the default model without anything sent (#99). Results are written to
-`first-session-model-result.json`.
+Needs a model-ready throwaway home. Creates a new session, the order of the first app start: its
+model must go from "resolving" to "ready" with the model its runtime reports, without anything
+sent (#99). Results are written to `first-session-model-result.json`.
 ## A refused image does not trap the session
 
 ```powershell

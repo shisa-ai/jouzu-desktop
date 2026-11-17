@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { artifactPolicyFor, artifactPreset, catalogChangeSummary, parseControlState } from "./control-state";
-const valid = {schemaVersion:1,profile:null,account:{signedIn:false},credentials:[],customProviders:[],providers:[],models:[]};
+const valid = {schemaVersion:1,profile:null,account:{signedIn:false},credentials:[],customProviders:[],providers:[]};
 describe("configuration response boundary", () => {
  it("validates explicit model readiness", () => {
   expect(parseControlState({...valid,modelReady:false}).modelReady).toBe(false);
@@ -23,7 +23,7 @@ describe("configuration response boundary", () => {
    expect(() => parseControlState(old)).toThrow("incompatible");
  });
  it("rejects missing arrays, malformed rows and invalid versions", () => {
-   for (const key of ["credentials","providers","models","customProviders"]) {
+   for (const key of ["credentials","providers","customProviders"]) {
      expect(() => parseControlState({...valid,[key]:undefined})).toThrow();
      expect(() => parseControlState({...valid,[key]:[null]})).toThrow();
    }

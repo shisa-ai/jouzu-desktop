@@ -183,13 +183,22 @@ export function App() {
   const [provider, setProvider] = useState("");
   const [token, setToken] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
-  // The default-model choices are a running runtime's own model list (what it
-  // can run), read when Settings opens and after each settings change.
+  // The default-model choices are the warm runtime's own model list (what it
+  // can run). A settings change restarts that runtime, so the list is read once
+  // the host reports the new one started: never an older runtime's answer.
   const [runtimeModels, setRuntimeModels] = useState<{ provider: string; id: string; name: string }[]>([]);
   useEffect(() => {
     if (!settingsOpen) return;
     let current = true;
-    void api.models.list("").then(models => { if (current) setRuntimeModels(models); }).catch(() => { if (current) setRuntimeModels([]); });
+    setRuntimeModels([]);
+    void (async () => {
+      try {
+        let warm = await api.runtime.warmState(0);
+        while (current && warm.state === "starting") warm = await api.runtime.warmState(5000);
+        const models = current ? await api.models.list("") : [];
+        if (current) setRuntimeModels(models);
+      } catch { if (current) setRuntimeModels([]); }
+    })();
     return () => { current = false; };
   }, [api, settingsOpen, setup]);
   useEffect(() => {
@@ -410,30 +419,22 @@ export function App() {
   useEffect(() => {
     if (activePath) localStorage.setItem("jouzu.chat.workspace", activePath);
   }, [activePath]);
-  // A signed-in account supplies models through Jouzu's published catalog. The chat shell
-  // asks for a refresh only when the connected runtime has no models, so warm starts do not
-  // pay a network round trip. A successful refresh restarts the session with the new catalog.
-  // A refresh is cheap and the runtime's own terminal build does it at startup, so the
-  // desktop does it too. Only an activated revision needs a new runtime; a held revision
+  // A signed-in account supplies models through Jouzu's published catalog. The runtime's
+  // own terminal build refreshes it at startup, so the desktop does it once per launch and
+  // when the user asks. Only an activated revision needs a new runtime; a held revision
   // waits for the user's decision in the catalog dialog.
   async function refreshModelCatalog(force = false) {
     if (catalogAttempted.current && !force) return;
     catalogAttempted.current = true;
     setCatalogRefreshing(true);
     try {
-      // A newly issued account key can lag its catalog by a moment. Retry the
-      // refresh before leaving a signed-in install with an empty model list.
-      for (let attempt = 0; attempt < 3; attempt++) {
-        const next = await configure({ action: "refresh-catalogs" });
-        if (next) {
-          const outcome = next.catalog;
-          if (outcome?.held) setHeldCatalog(outcome.held);
-          // Nothing changed on disk unless a source activated a revision. An adapter
-          // that reports no outcome keeps the older behaviour and rebinds.
-          if (!outcome || outcome.sources.some(source => source.status === "activated")) requestSessionRestart();
-          return;
-        }
-        if (attempt < 2) await new Promise(resolve => window.setTimeout(resolve, 1000 * (attempt + 1)));
+      const next = await configure({ action: "refresh-catalogs" });
+      if (next) {
+        const outcome = next.catalog;
+        if (outcome?.held) setHeldCatalog(outcome.held);
+        // Nothing changed on disk unless a source activated a revision. An adapter
+        // that reports no outcome keeps the older behaviour and rebinds.
+        if (!outcome || outcome.sources.some(source => source.status === "activated")) requestSessionRestart();
       }
     }
     finally { setCatalogRefreshing(false); }
@@ -762,8 +763,6 @@ export function App() {
           if (!booting) entryReady.current = true;
         }}
         catalogRefreshing={catalogRefreshing}
-        canRefreshModels={setup?.account.signedIn === true}
-        onModelsMissing={() => void refreshModelCatalog()}
         workspaces={state?.recent ?? []}
         onSelect={setActivePath}
         onAddFolder={() => void chooseFolder()}

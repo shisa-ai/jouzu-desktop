@@ -38,7 +38,7 @@ test("a session opens once and switching replaces it once", async ({ page }) => 
       transformCallback: () => 1, unregisterCallback() {},
       invoke: async (command: string, args: any) => {
         if (command === "launcher_state") return { ready: true, bash: true, bundled_git: true, platform: "windows", recent: [{ id: "work", path: workspace, environment: { kind: "windows" } }] };
-        if (command === "control_request") return { schemaVersion: 1, modelReady: true, profile: "core", account: { signedIn: false }, credentials: [], customProviders: [], providers: [], models: [] };
+        if (command === "control_request") return { schemaVersion: 1, modelReady: true, profile: "core", account: { signedIn: false }, credentials: [], customProviders: [], providers: [] };
         if (command === "component_versions") return { jouzu: "0.3.8", development: true };
         if (command === "chat_sessions") return sessions;
         if (command === "chat_session_messages") return histories[String(args.sessionPath)] ?? [];

@@ -18,7 +18,8 @@ const call = async (path, body) => {
   for (let attempt = 0; attempt < 60; attempt += 1) {
     const response = await fetch(base + path, body ? { method: 'POST', headers, body: JSON.stringify(body) } : { headers });
     const json = await response.json();
-    if (json?.error?.code === 'control-busy') { await new Promise(resolve => setTimeout(resolve, 1000)); continue; }
+    // A settings change restarts the warm runtime; its list is read once it answers.
+    if (json?.error?.code === 'control-busy' || json?.error?.code === 'models-unavailable') { await new Promise(resolve => setTimeout(resolve, 1000)); continue; }
     if (!response.ok) throw new Error(`${path}: ${JSON.stringify(json)}`);
     return json;
   }

@@ -667,10 +667,12 @@ pub struct Session {
     steers_in_flight: AtomicUsize,
     /// A take-back is due once every steer in flight has been answered.
     reclaim_waiting: AtomicBool,
-    /// Created as a new conversation, not opened from a saved file. Only a new
-    /// one starts on the default model; a saved one keeps the model it used,
-    /// which the runtime restores when it opens the file.
+    /// Created as a new conversation, not opened from a saved file. Its
+    /// runtime starts on the runtime's own model; a saved one gets the model
+    /// the runtime restores when it opens the file.
     fresh: AtomicBool,
+    /// A client with a stream showed it: leaving it untouched hands its runtime back.
+    shown: AtomicBool,
     first_output_turn: Mutex<Option<String>>,
     first_output: Mutex<FirstOutput>,
     /// Held while this session attaches to a runtime from the warm pool.
@@ -1824,6 +1826,12 @@ impl Session {
                         "status": self.status().as_str(),
                     }),
                 );
+                // Switching before the command goes out: nothing the runtime
+                // answers from here on describes this session until it switched.
+                *self
+                    .handshake
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = Handshake::Switch;
                 let id = self.request_id();
                 let result =
                     self.write_command(pi::command::with_id(pi::command::switch_session(&path), &id));
@@ -1831,10 +1839,6 @@ impl Session {
                     self.fail(error.code, &error.message, error.retryable);
                     return;
                 }
-                *self
-                    .handshake
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = Handshake::Switch;
             }
             None => {
                 // The runtime's state first: its model is known before the
@@ -1878,6 +1882,9 @@ impl Session {
         if let Some(mut done) = self.command_answered(response_id) {
             done["success"] = value.get("success").cloned().unwrap_or(Value::Null);
             self.publish("session.command_done", done);
+            // A command can change the model or level, and the runtime does not
+            // report that on its own: ask it once the command is done.
+            self.request_state();
         }
         if response_id == FLOW_RELEASE_ID {
             log(
@@ -1919,14 +1926,22 @@ impl Session {
                 .unwrap_or_else(|poisoned| poisoned.into_inner()),
             Handshake::Switch
         );
-        if reply == pi::Reply::GetState && !switching {
+        // Only this session's own state requests carry its facts: the warm
+        // pool's and the liveness probe's answers say only that it lives.
+        let own = response_id.starts_with("r-");
+        if reply == pi::Reply::GetState && own && !switching {
             if let Some(data) = value.get("data") {
                 let state = pi::State::read(data);
-                if let Some(path) = state.session_file.as_deref() {
-                    *self
+                let moved = state.session_file.as_deref().filter(|path| {
+                    let mut current = self
                         .session_path
                         .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(path.to_string());
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    let moved = current.as_deref() != Some(*path);
+                    *current = Some(path.to_string());
+                    moved
+                });
+                if let Some(path) = moved {
                     // The first snapshot can precede the runtime's session file.
                     // Publish the attach once the path exists so every client can
                     // refresh its session index instead of waiting for a reload.
@@ -1944,12 +1959,18 @@ impl Session {
                 }
                 // The runtime's own answer, whatever it is: its model (or none)
                 // and level. The lists come from the same runtime.
-                self.model_answered.store(true, Ordering::SeqCst);
-                self.set_model(state.model.clone());
+                let first = !self.model_answered.swap(true, Ordering::SeqCst);
+                let changed = self.set_model(state.model.clone());
                 if let Some(level) = state.thinking_level.clone() {
                     self.set_thinking_level(Some(level));
                 }
-                self.request_model_lists();
+                if first || changed {
+                    self.request_model_lists();
+                }
+                // What waited for a model can go now.
+                if first && self.model_state() == "ready" {
+                    self.start_queued_turn();
+                }
             }
         }
         let success = value
@@ -3712,17 +3733,7 @@ impl Session {
             }));
         }
         // Only a session whose runtime reports a model can send.
-        match self.model_state() {
-            "ready" => {}
-            state => {
-                return Err(ApiError::new(
-                    axum::http::StatusCode::CONFLICT,
-                    "no-model",
-                    "The session has no model",
-                    state == "resolving",
-                ))
-            }
-        }
+        self.model_for_turn()?;
         let counter = self.next_message.fetch_add(1, Ordering::Relaxed) + 1;
         let message_id = format!("m-{counter}");
         let images: Vec<(&str, &str)> = attachments
@@ -3837,7 +3848,7 @@ impl Session {
         self.publish_summary();
         if matches!(self.status(), Status::Pending) {
             self.set_status(Status::Starting);
-            self.start(true);
+            self.start();
             if matches!(self.status(), Status::Cancelled | Status::Error) {
                 self.end_active_turn(json!({ "aborted": true, "reason": "runtime-unavailable" }));
                 messages.remove(client_message_id);
@@ -3934,7 +3945,22 @@ impl Session {
         Ok(json!({ "status": "tombstoned" }))
     }
 
+    /// A turn reaches the runtime only when the runtime reports a model; the
+    /// refusal is typed, and whatever waits stays where it is.
+    fn model_for_turn(&self) -> Result<(), ApiError> {
+        match self.model_state() {
+            "ready" => Ok(()),
+            state => Err(ApiError::new(
+                axum::http::StatusCode::CONFLICT,
+                "no-model",
+                "The session has no model",
+                state == "resolving",
+            )),
+        }
+    }
+
     pub fn continue_queue(self: &Arc<Self>) -> Result<Value, ApiError> {
+        self.model_for_turn()?;
         self.queue_paused.store(false, Ordering::SeqCst);
         // Do not write a queued prompt until the replacement runtime has completed
         // its handshake. A Recovering session starts the queue from the handshake
@@ -3948,6 +3974,7 @@ impl Session {
     }
 
     pub fn retry_failed(self: &Arc<Self>) -> Result<Value, ApiError> {
+        self.model_for_turn()?;
         let Some(failed) = self
             .failed_turn
             .lock()
@@ -4060,17 +4087,9 @@ impl Session {
         }
         if matches!(kind, "get_messages" | "get_state") {
             match self.status() {
-                Status::Pending => {
-                    if kind == "get_messages" {
-                        return Ok(json!({ "messages": [] }));
-                    }
-                    return Ok(json!({
-                        "sessionId": self.id,
-                        "isStreaming": false,
-                        "model": null,
-                        "thinkingLevel": "off",
-                        "sessionFile": null,
-                    }));
+                // A new conversation whose runtime is not started has no history.
+                Status::Pending if kind == "get_messages" => {
+                    return Ok(json!({ "messages": [] }));
                 }
                 Status::Starting | Status::Recovering => {
                     let _ = tokio::time::timeout(
@@ -4148,12 +4167,13 @@ impl Session {
     /// Whether the runtime can take a model or level command now. Before the
     /// runtime has answered for this session there is nothing to change: the
     /// caller sees `resolving` and must not ask (typed refusal, no waiting).
+    /// The same fact gates a send (`model_state`), so the two cannot disagree.
     fn model_command_ready(&self) -> Result<(), ApiError> {
-        let attached = matches!(
+        let live = !matches!(
             self.status(),
-            Status::Idle | Status::Running | Status::WaitingApproval | Status::WaitingQuestion
+            Status::Pending | Status::Error | Status::Stopped | Status::Cancelled
         );
-        if attached && self.model_answered.load(Ordering::SeqCst) {
+        if live && self.model_answered.load(Ordering::SeqCst) {
             return Ok(());
         }
         Err(ApiError::new(
@@ -4207,7 +4227,7 @@ impl Session {
     }
 
     /// The model is part of the session summary; publish it when it changes.
-    fn set_model(&self, model: Option<Value>) {
+    fn set_model(&self, model: Option<Value>) -> bool {
         let changed = {
             let mut current = self
                 .model
@@ -4223,6 +4243,7 @@ impl Session {
         if changed {
             self.publish_summary();
         }
+        changed
     }
 
     /// Replace one of the runtime's lists; publish when it changed.
@@ -4283,13 +4304,14 @@ impl Session {
     /// Change this session's reasoning level. The runtime clamps it to the
     /// model and reports the result (`thinking_level_changed`).
     pub async fn select_thinking(&self, level: &str) -> Result<Value, ApiError> {
+        // Nothing is echoed: the level in effect arrives as the runtime reports it.
         self.model_command_ready()?;
         self.request(
             pi::command::set_thinking_level(level),
             Duration::from_secs(30),
         )
         .await?;
-        Ok(json!({ "level": level }))
+        Ok(json!({}))
     }
 
     pub fn stop(&self) {
@@ -4543,6 +4565,7 @@ impl Session {
             steers_in_flight: AtomicUsize::new(0),
             reclaim_waiting: AtomicBool::new(false),
             fresh: AtomicBool::new(false),
+            shown: AtomicBool::new(false),
             queue_paused: AtomicBool::new(false),
             first_output_turn: Mutex::new(None),
             next_message: AtomicU64::new(0),
@@ -4596,7 +4619,7 @@ impl Session {
         }
         log(&self.home, "info", "session.attach_early", json!({ "session": self.id }));
         self.set_status(Status::Starting);
-        self.start(true);
+        self.start();
     }
 
     /// Nothing was ever said in it: a new conversation the user left before
@@ -4616,7 +4639,7 @@ impl Session {
                 .is_empty()
     }
 
-    fn start(self: &Arc<Self>, from_pending: bool) {
+    fn start(self: &Arc<Self>) {
         if let Err(error) = std::fs::OpenOptions::new()
             .create(true)
             .truncate(false)
@@ -4626,7 +4649,7 @@ impl Session {
             self.fail("internal", &format!("Could not create the runtime lease: {error}"), false);
             return;
         }
-        self.spawn_runtime(true, from_pending);
+        self.spawn_runtime(true);
     }
 
     /// The folder the runtime starts in: the session file's own folder text when
@@ -4650,7 +4673,7 @@ impl Session {
         })
     }
 
-    fn spawn_runtime(self: &Arc<Self>, initial: bool, from_pending: bool) -> bool {
+    fn spawn_runtime(self: &Arc<Self>, initial: bool) -> bool {
         // Stopped before its start ran (the start is spawned): a runtime started
         // now would belong to nobody and live until the host exits (#93).
         if matches!(self.status(), Status::Stopped | Status::Cancelled) {
@@ -4707,7 +4730,7 @@ impl Session {
                 tokio::spawn(async move {
                     pool.wait_turn(Duration::from_secs(300)).await;
                     if matches!(session.status(), Status::Starting | Status::Recovering) {
-                        session.spawn_runtime(initial, from_pending);
+                        session.spawn_runtime(initial);
                     }
                 });
                 return true;
@@ -4737,16 +4760,8 @@ impl Session {
             }
             Err(error) => {
                 let message = format!("Could not start the runtime: {error}");
-                if initial && !from_pending {
+                if initial {
                     self.fail("runtime-unavailable", &message, true);
-                } else if initial {
-                    // The first send started it; that send answers for its turn.
-                    self.set_status(Status::Cancelled);
-                    let _ = std::fs::remove_file(&self.lease_path);
-                    self.publish(
-                        "error",
-                        json!({ "code": "runtime-unavailable", "message": message, "retryable": true }),
-                    );
                 } else {
                     self.recovery_failed(format!("Could not restart the runtime: {error}"));
                 }
@@ -4761,6 +4776,12 @@ impl Session {
         mut events: tokio::sync::mpsc::Receiver<RuntimeEvent>,
     ) {
         let generation = self.runtime_generation.fetch_add(1, Ordering::SeqCst) + 1;
+        // A new runtime has its own model: until it answers, the session's
+        // model is unknown again, not the last runtime's.
+        self.model_answered.store(false, Ordering::SeqCst);
+        self.set_model(None);
+        self.set_list(&self.models, Vec::new());
+        self.set_list(&self.thinking_levels, Vec::new());
         *self
             .runtime
             .lock()
@@ -4834,7 +4855,7 @@ impl Session {
         // The Job Object must be gone before the replacement starts: Flow
         // allows one live attachment per session file.
         tokio::time::sleep(Duration::from_millis(50)).await;
-        self.spawn_runtime(false, false);
+        self.spawn_runtime(false);
     }
 
     fn recovery_failed(self: &Arc<Self>, reason: String) {
@@ -4936,7 +4957,9 @@ impl Session {
     /// queue is not paused after a Stop, and nothing else may run. Checked and
     /// claimed at once.
     fn start_queued_turn(self: &Arc<Self>) -> bool {
+        // Without a model the turn would only fail at the runtime: it waits.
         if self.queue_paused.load(Ordering::Relaxed)
+            || self.model_state() != "ready"
             || !matches!(
                 self.status(),
                 Status::Idle | Status::Running | Status::WaitingApproval | Status::WaitingQuestion
@@ -5918,10 +5941,12 @@ impl SessionManager {
         let stale: Vec<String> = sessions
             .iter()
             .filter(|(id, session)| {
-                // A new conversation attached early and left untouched gives its
-                // runtime back as soon as no client shows it.
+                // A new conversation a client showed and left untouched gives
+                // its runtime back as soon as no client shows it. One no client
+                // ever showed (an API caller) follows the idle rule below.
                 let untouched = session.status() == Status::Idle
                     && !held.contains(id)
+                    && session.shown.load(Ordering::SeqCst)
                     && session.untouched();
                 // A session in error that nobody shows can still own a live
                 // runtime; it is released like an idle one (#93). Opening it
@@ -6147,13 +6172,22 @@ impl SessionManager {
     /// The client opened or used this session; it replaces what it held.
     /// Only a client with a connected stream holds anything.
     pub fn hold(&self, client_id: &str, session_id: &str) {
-        if let Some(holder) = self
+        let held = match self
             .holders
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .get_mut(client_id)
         {
-            holder.session = Some(session_id.to_string());
+            Some(holder) => {
+                holder.session = Some(session_id.to_string());
+                true
+            }
+            None => false,
+        };
+        if held {
+            if let Some(session) = self.get(session_id) {
+                session.shown.store(true, Ordering::SeqCst);
+            }
         }
     }
 
@@ -6423,7 +6457,7 @@ impl SessionManager {
             // to it seconds (or, on a busy machine, minutes) later.
             session.open_saved_history();
             let starting = session.clone();
-            tokio::spawn(async move { starting.start(false) });
+            tokio::spawn(async move { starting.start() });
         } else if let Some(pool) = config.warm.get() {
             // A new session: the user is typing; warm for its folder meanwhile.
             pool.aim(Path::new(&session.runtime_cwd()));
@@ -6502,37 +6536,31 @@ impl SessionManager {
         }
     }
 
-    /// The models a running runtime registered (`get_available_models`): an
-    /// unused warm runtime's, else an attached session's. `None` while no
-    /// runtime is running.
+    /// The models the warm runtime registered (`get_available_models`).
+    /// `None` while it is not ready.
     pub async fn runtime_models(&self) -> Option<Result<Value, ApiError>> {
-        if let Some(runtime) = self.warm_runtime().and_then(|pool| pool.ready_runtime()) {
-            let id = format!("models-{}", random_id());
-            let answer = runtime
-                .request(
-                    pi::command::with_id(pi::command::get_available_models(), &id),
-                    Duration::from_secs(10),
-                )
-                .await;
-            if let Ok(data) = answer {
-                return Some(Ok(data));
-            }
-        }
-        let sessions: Vec<Arc<Session>> = self
-            .sessions
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .values()
-            .cloned()
-            .collect();
-        let session = sessions
-            .into_iter()
-            .find(|session| session.model_command_ready().is_ok())?;
-        Some(
-            session
-                .request(pi::command::get_available_models(), Duration::from_secs(10))
-                .await,
-        )
+        // Only the warm runtime: every settings change restarts it, so its list
+        // is the current one. A session's runtime may predate the change.
+        let runtime = self.warm_runtime().and_then(|pool| pool.ready_runtime())?;
+        let id = format!("models-{}", random_id());
+        let answer = runtime
+            .request(
+                pi::command::with_id(pi::command::get_available_models(), &id),
+                Duration::from_secs(10),
+            )
+            .await;
+        Some(answer.map_err(|error| {
+            let message = match error {
+                RequestError::Timeout => "The runtime did not answer".to_string(),
+                RequestError::Closed(message) | RequestError::Runtime(message) => message,
+            };
+            ApiError::new(
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                "models-unavailable",
+                message,
+                true,
+            )
+        }))
     }
 
     pub fn warm_runtime(&self) -> Option<Arc<WarmPool>> {

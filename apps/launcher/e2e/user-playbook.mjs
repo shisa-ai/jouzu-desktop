@@ -565,31 +565,28 @@ async function shisaKeyWithoutRestart() {
 }
 
 /**
- * The first new session after the app starts (#99). It was created before the
- * model list was known and showed "Select model", and Send did nothing without
- * a reason. Runs before the reload below, so the host is as freshly started as
- * the user's. Pass: the session shows a model; with no model at all, Send says
- * why above the composer instead of doing nothing.
+ * The first new session after the app starts (#99). Its model is the one its
+ * runtime reports: the button shows it once the runtime answered. With no model
+ * at all, Send is not offered and the button leads to setting one up.
  */
 async function firstSessionHasModel() {
-  const name = "First new session after start has a model, or Send says why (#99)";
+  const name = "First new session after start shows its runtime's model, or offers setup (#99)";
   await newSession().waitFor({ timeout: 30_000 });
   await newSession().click();
   await composer().waitFor({ timeout: 10_000 });
   const modelButton = page.getByRole("button", { name: "Model", exact: true }).first();
-  const shown = async () => !/^\s*select model\s*$/i.test(await modelButton.innerText().catch(() => ""));
-  const end = now() + 15_000;
-  while (now() < end && !await shown()) await page.waitForTimeout(100);
-  if (await shown()) {
-    scenario(name, true, `model shown: ${(await modelButton.innerText()).trim()}`);
+  const label = async () => (await modelButton.innerText().catch(() => "")).trim();
+  // Empty while the runtime has not answered (a spinner); then a model or a setup offer.
+  const end = now() + 30_000;
+  while (now() < end && !await label()) await page.waitForTimeout(100);
+  const shown = await label();
+  if (shown && !/^(select model|set up a model)$/i.test(shown)) {
+    scenario(name, true, `model shown: ${shown}`);
     return;
   }
-  // Nothing to send with: the press must be answered with the reason.
   await composer().fill("model check");
-  await send().click();
-  const reason = page.getByText(/Choose a model before sending|No model is available/).first();
-  const explained = await reason.waitFor({ timeout: 20_000 }).then(() => true, () => false);
-  scenario(name, explained, explained ? "no model configured; Send explained why" : "no model shown and Send gave no reason");
+  const disabled = await send().isDisabled().catch(() => false);
+  scenario(name, !!shown && disabled, shown ? `no model (${shown}); Send ${disabled ? "not offered" : "still offered"}` : "the runtime never reported a model state");
   await composer().fill("");
 }
 

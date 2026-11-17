@@ -79,5 +79,4 @@ export const emptyControlState = {
   credentials: [],
   customProviders: [],
   providers: [],
-  models: [],
 };

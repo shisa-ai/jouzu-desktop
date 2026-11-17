@@ -99,7 +99,7 @@ POST /sessions/{id}/interrupt | /cancel | /stop | /queue
 POST /sessions/{id}/model | /thinking | /compact | /export | /reload
 POST /approvals/{id}/decision        { clientId, decision }
 POST /questions/{id}/answer          { clientId, answers }
-GET  /models, POST /models/refresh
+GET  /models (the running runtime's own list)
 GET|PUT /tools, GET /mcp, GET|POST /workspaces
 POST /control, POST /control/cancel
 ```

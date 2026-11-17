@@ -201,10 +201,10 @@ try {
     if (!runtime.getProvider(request.provider)) throw new Error('Unknown provider');
     await auth.delete(request.provider);
   } else if (request.action === 'default-model') {
-    // Which models exist is the runtime's answer (its own model list); this
-    // only checks the shape before writing the setting.
+    // The runtime's own registry decides which models exist: a default it
+    // does not know would be saved while the runtime starts on another model.
     const name = value => typeof value === 'string' && value.length > 0 && value.length <= 256 && ![...value].some(c => c.charCodeAt(0) < 32);
-    if (!name(request.provider) || !name(request.model)) throw new Error('Invalid model');
+    if (!name(request.provider) || !name(request.model) || !runtime.getModel(request.provider, request.model)) throw new Error('Unknown model');
     settings.setDefaultModelAndProvider(request.provider, request.model);
     await settings.flush();
   } else if (request.action !== 'status') throw new Error('Unsupported operation');

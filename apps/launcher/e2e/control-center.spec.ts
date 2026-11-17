@@ -95,7 +95,7 @@ const updateStub = (config: {
         jouzu: config.jouzuVersion, launcher: config.launcherVersion, development: true,
         jouzuUpdaterConfigured: config.configured[0], launcherUpdaterConfigured: config.configured[1],
       };
-      if (command === 'control_request') return { schemaVersion: 1, profile: 'core', account: { signedIn: false }, credentials: [], customProviders: [], providers: [], models: [] };
+      if (command === 'control_request') return { schemaVersion: 1, profile: 'core', account: { signedIn: false }, credentials: [], customProviders: [], providers: [] };
       if (command === 'environment_read') return [];
       if (command === 'git_bash' || command === 'terminal') return 1;
       if (command === 'plugin:dialog|confirm' || command === 'plugin:dialog|message') return true;

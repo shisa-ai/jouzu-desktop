@@ -79,9 +79,16 @@ describes no screens; what a person sees is in the UI document.
 - The thinking level is the runtime's: the host follows `thinking_level_changed`.
 - A new session starts its runtime when it is created (a warm one when ready):
   nothing can be sent until that runtime reports a model.
-- Settings reads a running runtime's list (`GET /v1/models`: an unused warm
-  runtime's, else an attached session's; relayed, not cached). After a
-  configuration operation the host recycles its own warm runtime. Live sessions
+- The model facts come from the session's own state requests (the handshake's
+  `get_state`, and one after each slash command, since the runtime reports no
+  model change on its own: runtime G-row). The liveness probe's answers say only
+  that the runtime lives. A new runtime for the session (recovery) makes the
+  model `resolving` again until it answers. Queued and retried turns wait for
+  `ready` like a send.
+- Settings reads the warm runtime's list (`GET /v1/models`, relayed, not
+  cached; `models-unavailable` while it is not ready). After a configuration
+  operation the host recycles the warm runtime, so its list is the current one;
+  a session's runtime may predate the change and is never asked. Live sessions
   keep the models they started with until the runtime can reload (runtime G2).
 
 ## 5. Configuration queue
