@@ -13,8 +13,12 @@ and 0.2.6 packages; they behave the same in both.
 ## Boundary
 
 - One runtime process per session, talking to the host over stdio RPC.
-  Configuration, sign-in and the model catalog go through the runtime's control
-  channel.
+  Each runtime answers for its own models over RPC (`get_state`,
+  `get_available_models`, `get_available_thinking_levels`).
+- Configuration and sign-in go through Desktop's control program
+  (`packaging/launcher/control.mjs`). It imports jouzu internals today; a
+  supported configuration interface is requested (G5). The control program is
+  not a source of models.
 - The host uses the runtime through an adapter. Supporting another runtime built
   on the same kernel means replacing the adapter, nothing else.
 - Runtime events and runtime text reach the host only. The runtime's state is the
@@ -28,8 +32,10 @@ and 0.2.6 packages; they behave the same in both.
 | Runs started by the runtime | Flow and extensions can start a run with no prompt from the host | The host records it as a run with `origin = runtime` |
 | Input during a run | While streaming, input must carry `steer` or `followUp`; a plain prompt is refused ("Agent is already processing"). Such input is not accepted during retry or compaction. Queued steers are dropped when the run is aborted. Flow's automated sends wait until user input has been handled | The host chooses prompt or steer from the streaming state; during retry/compaction the message stays in the host queue; dropped steers return to the queue |
 | Answering a prompt | The answer to `prompt` comes after the extensions' input handlers: refused, `handled` (used without a run), or `started`, written just before that run's `agent_start` | A run that starts before the host's prompt was answered is the runtime's own; the prompt waits in the host queue for its answer |
-| Choosing a model | RPC `set_model` changes only that session (recorded in the session file); making it the global default is the caller's choice | When the person picks a model in a session, the host also writes it as the runtime's default model, so new sessions use the last selected model |
-| Model catalog | Control `available-models` returns the list and the default model; the catalog has a revision, and Shisa provider ids carry it; a runtime reads the catalog only at start | The host records which revision each runtime loaded and recycles runtimes when the revision changes |
+| Model list | RPC `get_available_models` returns the models that runtime registered: exactly what its `set_model` accepts. Only credentialed models are listed. A runtime loads catalogs at start; the kernel can reload but RPC has no command for it (G2). The 16-hex suffix in `catalog:` ids is a hash of the catalog source URL, not a revision | The host relays each runtime's list as it is: no filter, no cache, no revision. Live sessions are not restarted to refresh it |
+| A session's starting model | The runtime picks it by its own rules (restore from the session file with fallback, else its initial-model rules). Restoring the last-used model, applying the catalog default and the background catalog refresh run only in interactive mode, not RPC (G1) | The host shows what `get_state` reports; it does not choose, guess or override it |
+| Choosing a model | RPC `set_model` changes only that session (recorded in the session file). The runtime records the last-used model (`model-picker.json`) | The host relays the pick and writes no default. Remembering the last pick is the runtime's (G1); until then the UI remembers it |
+| Thinking level | The runtime clamps the level to the model and emits `thinking_level_changed`; `get_available_thinking_levels` lists the allowed ones | The host relays the runtime's value and list |
 | Configuration channel | One configuration operation at a time | The host queues operations |
 | Input length | No length cap on user prompts; a 32 KiB cap applies only to external and Flow-composed input; fitting the model's context window is checked by the runtime | The host adds no length limit of its own |
 | Notifications | Extensions send text through `notify` (for example MCP "needs sign-in, Run /mcp"), once per runtime start | The host deduplicates per session and routes it to the feature it belongs to |
@@ -48,6 +54,13 @@ None of these is fixed in the desktop.
 | Choosing Simplified Chinese falls back to English (locale not reviewed) | Not filed; to be confirmed |
 | Structured codes for provider errors (quota, refused image, authentication), not only text | Not filed; proposed. Until then the host's text classification is a stopgap |
 | Whether Flow still starts runs on its own after Stop | Part of the Flow design; waits on jouzu#57–#62 |
+| G1: RPC mode starts like interactive mode: restore the last-used model, apply the catalog default, run the background catalog refresh | To file |
+| G2: an RPC `reload` command (catalogs and credentials changed while a session runs) | To file |
+| G3: an RPC event when the session's model changes | To file |
+| G4: a structured result when a restored model is unavailable and another is used | To file |
+| G5: a supported configuration interface (sign-in, keys, providers, catalogs, default model, language) | To file |
+| G6: structured provider error codes (same as the row above) | To file |
+| G7: input correlation: the client's id on user-message echoes; `held` distinct from `handled`; a typed reason when input is refused as busy | To file |
 
 ## Constraints on the runtime integration
 

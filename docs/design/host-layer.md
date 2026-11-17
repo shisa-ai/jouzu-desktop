@@ -10,8 +10,8 @@ describes no screens; what a person sees is in the UI document.
 
 ## 1. Responsibilities
 
-- The host is the only owner of session state, the model catalog, configuration
-  operations and errors.
+- The host is the only owner of session state, configuration operations and
+  errors. Models are runtime facts: the host relays each runtime's own answer.
 - Runtime events and runtime text reach the host only. The host classifies them,
   removes duplicates and writes the result into its snapshots. Clients render
   snapshots; they never parse runtime text.
@@ -25,7 +25,7 @@ describes no screens; what a person sees is in the UI document.
 
 | State | Single owner | Copies today (to be removed) |
 |---|---|---|
-| Model catalog and default model | host `ModelCatalog` | UI: catalog list fetched once, per-session list, stored preference, Settings list. Host: the default is adopted only when a client calls `GET /v1/models` |
+| Models: list, a session's model, thinking level | each session's runtime, relayed in `SessionView` | Desktop's control program builds a second list (`available-models`) that `set_model` does not use. Host: `models.rs` cache, filter and retry; the default adopted on `GET /v1/models`. UI: catalog list fetched once, per-session list, stored preference, Settings list |
 | Run state, including runs started by Flow | host `Session.run` | Host: `active_turn` and `status = Running` disagree. UI: infers busy on its own |
 | Queue of messages sent during a run | host `Session.queue` | UI-local queue |
 | Configuration operations | host `ConfigQueue` | One operation at a time with `409`, partly queued in the UI, bypassed by environment save |
@@ -63,21 +63,26 @@ describes no screens; what a person sees is in the UI document.
 - Open question: confirm that a message sent while a Flow run is streaming is
   delivered as a steer under these rules.
 
-## 4. Model catalog
+## 4. Models
 
-- The host loads the catalog eagerly at start, with a `revision`. It does not
-  depend on a client calling `GET /v1/models`.
-- When the catalog changes, the revision increases and `models.changed` is sent.
-  The host recycles warm runtimes that loaded an older revision.
-- A new session uses the default model. The default exists in one place only:
-  the jouzu runtime's default-model setting.
-- When the person changes the model in a session, the host calls RPC `set_model`
-  (session only) and, on success, writes the runtime default through the
-  ConfigQueue, so the next new session uses the last selected model.
-- A session's model state is `resolving`, `ready` or `unavailable`. Send is
-  refused unless it is `ready` (`no-model` or `model-unavailable`).
-- If changing the model fails, the session keeps its previous model. The failure
-  is in that command's result only; it is not a session error.
+- The host keeps no model list of its own. When a runtime attaches or restarts,
+  the host reads `get_state`, `get_available_models` and
+  `get_available_thinking_levels` and puts the answers in `SessionView` as they
+  are.
+- A session's model state is `resolving` (the runtime has not answered yet),
+  `ready` (the runtime reports a model) or `none` (the runtime reports none).
+  Send is refused with `no-model` unless it is `ready`.
+- Changing the model calls RPC `set_model` for that session only. On failure the
+  command returns `model-unavailable` with the runtime's text; the session keeps
+  its model and nothing else changes. The host writes no default and holds no
+  pick of its own.
+- The thinking level is the runtime's: the host follows `thinking_level_changed`.
+- A new session starts its runtime when it is created (a warm one when ready):
+  nothing can be sent until that runtime reports a model.
+- Settings reads a running runtime's list (`GET /v1/models`: an unused warm
+  runtime's, else an attached session's; relayed, not cached). After a
+  configuration operation the host recycles its own warm runtime. Live sessions
+  keep the models they started with until the runtime can reload (runtime G2).
 
 ## 5. Configuration queue
 
@@ -156,8 +161,9 @@ succeed, the response says so. Examples:
 | `lifecycle` | `pending` / `starting` / `ready` / `recovering` / `stopped` / `failed` |
 | `run` (sent as `activeTurn`) | `id`, `origin` (`user` / `runtime`), `phase` (`starting` / `running` / `cancelling`), `startedAt`, `step`, `clientMessageId?` |
 | `queue[]` | Message, state (`queued` / `held` / `delivering` / `returned`), `error?` |
-| `model` | `provider`, `id`, `name`, `state` (`resolving` / `ready` / `unavailable`), `catalogRevision` |
-| `thinkingLevel` | Current value |
+| `model` | `provider`, `id`, `name`, `state` (`resolving` / `ready` / `none`) |
+| `models[]` | The runtime's `get_available_models`, unchanged |
+| `thinkingLevel`, `thinkingLevels[]` | The runtime's current value and allowed values |
 | `lastRun.error` | Failure of the last reply |
 | `lastAction` | Result of the last in-session command |
 | `failure` | Why the session ended, and the available recovery (`restart` / `remove-images` / `clear-flow`) |
@@ -171,14 +177,13 @@ through the host, never from its saved file, which has none of it.
 
 | Field | Content |
 |---|---|
-| `models` | `revision`, `stale`, `chat[]`, `image[]`, `default` |
 | `settings` | Current settings |
 | `config` | `running`, `queued[]`, `lastResult[kind]` |
 | `startup` | State and cause |
 
 ### 7.3 Events and commands
 
-- SSE events: `session.updated` (full snapshot), `app.updated`, `models.changed`,
+- SSE events: `session.updated` (full snapshot), `app.updated`,
   `settings.changed`. Snapshots carry a sequence number; a client catches up by
   sequence after reconnecting.
 - Commands are HTTP. Each returns acceptance or a typed refusal synchronously;
@@ -187,6 +192,8 @@ through the host, never from its saved file, which has none of it.
 ## 8. Host code to remove
 
 - `adopt_listed_default`: the default model adopted only on `GET /v1/models`.
+- `models.rs` (cache, filter, retry, default) and the control program's
+  `available-models`.
 - Steer decided from `active_turn`.
 - The single-operation `409` in control and its retry loop in `models.rs`.
 - Operation failures and runtime information mixed into `session.notice`.
@@ -199,7 +206,7 @@ host, then the UI, then verified on the packaged build before the next.
 | Step | Change | Acceptance |
 |---|---|---|
 | 2 | Runs driven by `agent_start` / `agent_settled`; steer decision; `held` / `returned` queue states | A send during a Flow run becomes a steer; after Stop, unused messages are back in the queue |
-| 4 | ModelCatalog: eager, revisioned, remembers the last selected model | A session can be created without any client calling `/models`; after a model change, new sessions use it |
+| 4 | Models relayed from each runtime | Every model offered is accepted by `set_model`; a new session shows the runtime's model with no client call; with no model, a direct API send gets `no-model`; after a model change the level shown is the runtime's |
 | 6 | ConfigQueue | Saving a key while the catalog refreshes: both complete, no `409` |
 | 8 | Error slots, escalation, codes, `host.log` | One of two parallel tool calls fails: only its `tool.result` changes; a session ends: exactly one `failure`, cascades in the log; with no model, a direct API send gets `no-model`; every error has code, parameters and original text |
 

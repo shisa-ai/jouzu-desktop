@@ -56,8 +56,10 @@ ever appears in the composer's place, and only one at a time.
   shows a small failed mark; its tooltip says why. Nothing else changes.
 - **Stop, compact, export, a command fails**: the result shows at that control
   (the button's state, the command's own output line), not as a session message.
-- A new session starts on the last selected model. The UI does not remember it
-  itself; it shows what the host reports.
+- A new session shows the model its runtime reports. Restoring the last selected
+  model belongs to the runtime (runtime G1). Until it does, the UI remembers the
+  last pick and selects it once the session is ready; that memory is never shown
+  as the session's state.
 
 ## 5. Session header and sidebar
 
@@ -119,7 +121,7 @@ build before the next.
 | Step | Change | Acceptance |
 |---|---|---|
 | 3 | Session state: render `run` and `queue` only; remove local inference | A send during a Flow run goes to the queue; after Stop the queue is correct |
-| 5 | Model button and lists use only the host catalog | Sending right after creating a session no longer loses the message; Send is unavailable while the model is not ready |
+| 5 | Model button and lists show only the session's models from the host | Sending right after creating a session no longer loses the message; Send is unavailable while the model is not ready |
 | 7 | Each settings card shows its own progress and result | Several actions in a row all complete; a failed save shows only on its card |
 | 9 | Errors shown where they belong, in four languages | One of two parallel tool calls fails: only its card shows it; model change fails: only the model button changes; session ends: composer replaced by reason and one action; longest text and a long token at the smallest window: nothing moves or widens; no toast component exists |
 
