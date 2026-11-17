@@ -230,6 +230,8 @@ export class SessionStore {
   /** Images of messages waiting in the host queue, so Edit can give them back. */
   private waitingImages = new Map<string, ChatImage[]>();
   private following = false;
+  /** The last session event this store applied (the host's per-session cursor). */
+  private seen = 0;
   private routerUnsubscribe?: () => void;
   private disposed = false;
   /** The last model the person picked (UI memory), applied once per session. */
@@ -250,7 +252,10 @@ export class SessionStore {
     this.state = { ...this.state, sessionId: session.id, connected: true, ...(session.sessionPath ? { sessionFile: session.sessionPath } : {}) };
     // Start from the host's state at attach: what it published before this
     // store subscribed (the model it set at creation) never arrives as an event.
-    if (session.initial) this.applySummary(session.initial as Data);
+    if (session.initial) {
+      if (typeof session.initial.cursor === "number") this.seen = session.initial.cursor;
+      this.applySummary(session.initial as Data);
+    }
   }
 
   static async open(api: JouzuApi, workspacePath: string, sessionPath?: string): Promise<SessionStore> {
@@ -285,6 +290,16 @@ export class SessionStore {
       if (event.sessionId !== this.session.id) return;
       this.handle(event);
     });
+    // Events published between the attach answer and this subscription went
+    // past this store: read the session as it stands, unless a newer event
+    // already arrived.
+    const snapshot = this.api?.sessions?.snapshot;
+    if (!snapshot) return;
+    void snapshot(this.session.id).then(data => {
+      if (this.disposed || typeof data.cursor !== "number" || data.cursor < this.seen) return;
+      this.seen = data.cursor;
+      this.applySummary(data as Data);
+    }, () => undefined);
   }
 
   /** Stop listening to the router; this does not close any host session. */
@@ -774,6 +789,8 @@ export class SessionStore {
 
   private handle(event: ApiEvent): void {
     const data = (event.data ?? {}) as Data;
+    const at = event.sessionSeq ?? (event.seq === undefined ? event.id : undefined);
+    if (typeof at === "number" && at > this.seen) this.seen = at;
     switch (event.event) {
       case "session.snapshot": {
         // The same fields as `session.updated` (queue, failed message, turn,

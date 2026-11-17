@@ -328,6 +328,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/sessions/{id}/stop", axum::routing::post(stop_session))
         .route("/sessions/{id}/view", axum::routing::post(view_session))
+        .route("/sessions/{id}/snapshot", get(session_snapshot))
         .route("/sessions/{id}/stats", get(session_stats))
         .route("/sessions/{id}/compact", axum::routing::post(compact_session))
         .route("/sessions/{id}/export", axum::routing::post(export_session))
@@ -682,6 +683,16 @@ async fn get_session(
 ) -> Result<Json<Value>, ApiError> {
     let session = state.sessions.get(&id).ok_or_else(session_not_found)?;
     Ok(Json(session.info()))
+}
+
+/// The session as it stands now, with the cursor it is current to. A client that
+/// subscribed late compares the cursor with the events it already saw.
+async fn session_snapshot(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<Value>, ApiError> {
+    let session = state.sessions.get(&id).ok_or_else(session_not_found)?;
+    Ok(Json(session.snapshot_event().data))
 }
 
 async fn send_message(

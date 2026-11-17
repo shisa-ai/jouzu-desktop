@@ -54,6 +54,7 @@ function hostGroups(client: HostClient) {
     list: () => client.sessions(),
     attach: (workspacePath, sessionPath) => client.attach(workspacePath, sessionPath),
     view: sessionId => client.view(sessionId),
+    snapshot: sessionId => client.snapshot(sessionId),
     history: (sessionId, page) => client.history(sessionId, page),
     messages: (sessionPath, page) => client.messages(sessionPath, page),
     sanitizeImages: sessionPath => client.sanitizeSessionImages(sessionPath),

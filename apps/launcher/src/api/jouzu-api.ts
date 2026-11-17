@@ -201,6 +201,8 @@ export interface SessionApi {
   attach(workspacePath: string, sessionPath?: string): Promise<SessionHandle>;
   /** This client shows the session now; the host streams its content here again. */
   view?(sessionId: string): Promise<void>;
+  /** The session as it stands now; `cursor` is the last event it includes. */
+  snapshot?(sessionId: string): Promise<Record<string, unknown>>;
   history(sessionId: string, page?: { limit?: number; before?: number }): Promise<HistoryPage>;
   messages(sessionPath: string, page?: { limit?: number; before?: number }): Promise<SavedMessagesPage>;
   send(sessionId: string, message: OutgoingMessage): Promise<Receipt>;

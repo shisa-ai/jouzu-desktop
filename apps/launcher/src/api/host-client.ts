@@ -315,6 +315,10 @@ export class HostClient {
     });
   }
 
+  snapshot(sessionId: string): Promise<Record<string, unknown>> {
+    return this.request<Record<string, unknown>>(`/v1/sessions/${encodeURIComponent(sessionId)}/snapshot`);
+  }
+
   attach(workspacePath: string, sessionPath?: string): Promise<SessionHandle> {
     return this.request<SessionHandle>("/v1/sessions", {
       method: "POST",
