@@ -28,6 +28,8 @@ pub enum Record {
     CustomMessage,
     /// The runtime's own steering/follow-up queue changed.
     QueueUpdate,
+    /// The runtime set the session's thinking level (it clamps to the model).
+    ThinkingLevelChanged,
     ExtensionUiRequest,
     ExtensionError,
     Error,
@@ -62,6 +64,7 @@ pub fn classify(value: &Value) -> Record {
         Some("agent_settled") => Record::AgentSettled,
         Some("custom_message") => Record::CustomMessage,
         Some("queue_update") => Record::QueueUpdate,
+        Some("thinking_level_changed") => Record::ThinkingLevelChanged,
         Some("extension_ui_request") => Record::ExtensionUiRequest,
         Some("extension_error") => Record::ExtensionError,
         Some("error") => Record::Error,
@@ -169,6 +172,15 @@ pub mod command {
         json!({ "type": "clear_queue" })
     }
 
+    /// The models this runtime registered: exactly what its `set_model` accepts.
+    pub fn get_available_models() -> Value {
+        json!({ "type": "get_available_models" })
+    }
+
+    pub fn get_available_thinking_levels() -> Value {
+        json!({ "type": "get_available_thinking_levels" })
+    }
+
     pub fn set_model(provider: &str, model: &str) -> Value {
         json!({ "type": "set_model", "provider": provider, "modelId": model })
     }
@@ -204,6 +216,9 @@ pub enum Reply {
     GetMessages,
     SwitchSession,
     SetThinkingLevel,
+    SetModel,
+    AvailableModels,
+    AvailableThinkingLevels,
     Other,
 }
 
@@ -214,6 +229,9 @@ pub fn reply_to(response: &Value) -> Reply {
         Some("get_messages") => Reply::GetMessages,
         Some("switch_session") => Reply::SwitchSession,
         Some("set_thinking_level") => Reply::SetThinkingLevel,
+        Some("set_model") => Reply::SetModel,
+        Some("get_available_models") => Reply::AvailableModels,
+        Some("get_available_thinking_levels") => Reply::AvailableThinkingLevels,
         _ => Reply::Other,
     }
 }

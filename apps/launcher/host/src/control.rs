@@ -33,7 +33,6 @@ const STDOUT_LIMIT: usize = 8 * 1024 * 1024;
 /// The actions the contract exposes to the UI.
 const ACTIONS: &[&str] = &[
     "status",
-    "available-models",
     "refresh-catalogs",
     "catalog-accept",
     "catalog-reject",

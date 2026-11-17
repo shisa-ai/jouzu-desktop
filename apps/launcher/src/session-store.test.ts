@@ -142,7 +142,7 @@ describe("SessionStore", () => {
   });
 
   it("starts from the state the host reported at attach", () => {
-    const session = { ...fakeSession(), initial: { sessionId: "s-test", status: "idle", model: { provider: "p", id: "saved", name: "Saved model" } } };
+    const session = { ...fakeSession(), initial: { sessionId: "s-test", status: "idle", model: { provider: "p", id: "saved", name: "Saved model", state: "ready" } } };
     const store = SessionStore.attach(session);
     expect(store.snapshot.model).toBe("Saved model");
     expect(store.snapshot.modelId).toBe("saved");
@@ -260,12 +260,27 @@ describe("SessionStore", () => {
   it("shows the model the host reports for the session", () => {
     const session = fakeSession();
     const store = SessionStore.attach(session);
-    session.emit(event(1, "session.updated", { model: { provider: "shisa", id: "qwen-3.8", name: "Qwen 3.8" } }));
+    expect(store.snapshot.modelState).toBeUndefined();
+    session.emit(event(1, "session.updated", { model: { state: "resolving" }, models: [] }));
+    expect(store.snapshot.modelState).toBe("resolving");
+    expect(store.snapshot.modelId).toBeUndefined();
+    session.emit(event(2, "session.updated", {
+      model: { provider: "shisa", id: "qwen-3.8", name: "Qwen 3.8", state: "ready" },
+      models: [{ provider: "shisa", id: "qwen-3.8", name: "Qwen 3.8", contextWindow: 1000 }, { provider: "shisa", id: "credits", name: "Needs credits" }],
+      thinkingLevels: ["off", "high"],
+    }));
     expect(store.snapshot.model).toBe("Qwen 3.8");
     expect(store.snapshot.modelProvider).toBe("shisa");
     expect(store.snapshot.modelId).toBe("qwen-3.8");
-    session.emit(event(2, "session.updated", { model: null }));
+    // The runtime's list as it is, nothing dropped.
+    expect(store.snapshot.models?.map(model => model.id)).toEqual(["qwen-3.8", "credits"]);
+    expect(store.snapshot.thinkingLevels).toEqual(["off", "high"]);
+    // A field the update does not carry leaves the model as it was.
+    session.emit(event(3, "session.updated", { status: "idle" }));
     expect(store.snapshot.modelId).toBe("qwen-3.8");
+    session.emit(event(4, "session.updated", { model: { state: "none" }, models: [] }));
+    expect(store.snapshot.modelState).toBe("none");
+    expect(store.snapshot.modelId).toBeUndefined();
   });
 
   it("shows a tool call in the live reply as soon as it starts", () => {
@@ -493,7 +508,7 @@ describe("SessionStore", () => {
     expect(cancelled).toEqual(["c-2"]);
   });
 
-  it("keeps the remembered model when the model list could not be loaded (#99)", async () => {
+  it("switches a new session to the remembered model once, when its runtime offers it", async () => {
     const stored = new Map<string, string>([["jouzu.chat.model", JSON.stringify({ provider: "p", id: "remembered" })]]);
     vi.stubGlobal("localStorage", {
       getItem: (key: string) => stored.get(key) ?? null,
@@ -502,27 +517,33 @@ describe("SessionStore", () => {
     });
     try {
       const selected: string[] = [];
-      let listed: Array<{ provider: string; id: string; name: string }> | null = null;
-      const api = {
-        models: {
-          list: async () => { if (!listed) throw new Error("models-unavailable"); return listed; },
-          select: async (_session: string, provider: string, id: string) => { selected.push(`${provider}/${id}`); },
-        },
-      };
-      const store = SessionStore.attach(fakeSession(), undefined, api as never);
-      const load = (store as unknown as { load: () => Promise<void> }).load.bind(store);
-      // The host could not list the models yet: nothing says the choice is gone.
-      await load();
-      expect(stored.get("jouzu.chat.model")).toContain("remembered");
+      const api = { models: { select: async (_session: string, provider: string, id: string) => { selected.push(`${provider}/${id}`); } } };
+      const feed = (target: SessionStore, value: ApiEvent) => (target as unknown as { handle: (event: ApiEvent) => void }).handle(value);
+      const ready = (models: Array<{ provider: string; id: string }>) => ({ model: { provider: "p", id: "runtime-pick", name: "Runtime pick", state: "ready" }, models: models.map(model => ({ ...model, name: model.id })) });
+      // Not offered by this runtime: the runtime's model stays, the memory is kept.
+      const first = fakeSession();
+      const store = SessionStore.attach(first, undefined, api as never);
+      feed(store, event(1, "session.updated", ready([{ provider: "p", id: "runtime-pick" }])));
       expect(selected).toEqual([]);
-      // The next session, with the list, applies it.
-      listed = [{ provider: "p", id: "remembered", name: "Remembered" }];
-      const next = SessionStore.attach(fakeSession(), undefined, api as never);
-      await (next as unknown as { load: () => Promise<void> }).load.call(next);
+      expect(stored.get("jouzu.chat.model")).toContain("remembered");
+      // Offered: switched to once, while resolving nothing is asked.
+      const second = fakeSession();
+      const next = SessionStore.attach(second, undefined, api as never);
+      feed(next, event(1, "session.updated", { model: { state: "resolving" }, models: [] }));
+      expect(selected).toEqual([]);
+      feed(next, event(2, "session.updated", ready([{ provider: "p", id: "runtime-pick" }, { provider: "p", id: "remembered" }])));
+      feed(next, event(3, "session.updated", ready([{ provider: "p", id: "runtime-pick" }, { provider: "p", id: "remembered" }])));
+      await Promise.resolve();
       expect(selected).toEqual(["p/remembered"]);
-      expect(next.snapshot.modelId).toBe("remembered");
+      // A saved conversation keeps the model its runtime restored.
+      const saved = { ...fakeSession(), sessionPath: "/saved.jsonl" };
+      const third = SessionStore.attach(saved, undefined, api as never);
+      feed(third, event(1, "session.updated", ready([{ provider: "p", id: "runtime-pick" }, { provider: "p", id: "remembered" }])));
+      await Promise.resolve();
+      expect(selected).toEqual(["p/remembered"]);
       store.dispose();
       next.dispose();
+      third.dispose();
     } finally {
       vi.unstubAllGlobals();
     }

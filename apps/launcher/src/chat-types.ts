@@ -13,11 +13,11 @@ export interface ChatModel {
   contextWindow?: number;
   maxTokens?: number;
   cost?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number };
-  thinkingLevels?: string[];
-  /** False when the runtime cannot use this model now; `unavailableReason` says why. */
-  available?: boolean;
-  unavailableReason?: string | null;
+  /** Input kinds the model takes ("text", "image"). */
+  input?: string[];
 }
+/** A session's model as its runtime reports it: not answered yet, a model, or none. */
+export type ModelState = "resolving" | "ready" | "none";
 export interface SessionStats {
   userMessages?: number;
   assistantMessages?: number;
@@ -117,8 +117,9 @@ export interface ChatSnapshot {
   model?: string;
   modelProvider?: string;
   modelId?: string;
+  modelState?: ModelState;
+  /** The session runtime's own model list. */
   models?: ChatModel[];
-  modelsLoaded?: boolean;
   stats?: SessionStats;
   thinkingLevel?: string;
   thinkingLevels?: string[];

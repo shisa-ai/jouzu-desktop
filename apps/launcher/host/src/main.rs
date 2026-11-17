@@ -210,7 +210,6 @@ async fn main() -> ExitCode {
         sessions: sessions.clone(),
         control,
         events,
-        models: std::sync::Arc::new(jouzu_host::models::Models::new(&home)),
         web: std::sync::Arc::new(jouzu_host::web_access::WebAccess::load(&home)),
     };
     // Web access listeners follow the saved scope; addresses can change (DHCP,

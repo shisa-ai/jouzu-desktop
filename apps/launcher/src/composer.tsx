@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type ClipboardEvent } from "react";
-import { Check, ChevronDown, Cpu, Download, ImagePlus, Minimize2, Plus, RefreshCw, Send, ShieldAlert, Square, Video, X } from "lucide-react";
+import { Check, ChevronDown, Cpu, Loader2, Download, ImagePlus, Minimize2, Plus, RefreshCw, Send, ShieldAlert, Square, Video, X } from "lucide-react";
 import { IMAGE_ACCEPT, MAX_IMAGES, type ImageAttachment } from "./chat-attachments";
-import type { ChatModel } from "./chat-types";
+import type { ChatModel, ModelState } from "./chat-types";
 import type { TextGuardMode } from "./session-notices";
 import { Button } from "./components/ui/button";
 import { Input } from "./components/ui/input";
@@ -25,17 +25,17 @@ function modelDetails(model: ChatModel) {
   return [...limits, ...prices].join(" · ");
 }
 
-function ModelMenu({ open, onOpenChange, models, model, onSelect, thinkingLevel, thinkingLevels, onThinking, onOpen, onRetry }: {
+function ModelMenu({ open, onOpenChange, models, model, state, onSelect, thinkingLevel, thinkingLevels, onThinking, onSetup }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   models: readonly ChatModel[];
   model?: string;
+  state: ModelState;
   onSelect: (provider: string, id: string) => void;
   thinkingLevel?: string;
   thinkingLevels: readonly string[];
   onThinking: (level: string) => void;
-  onOpen?: () => void;
-  onRetry?: () => void;
+  onSetup?: () => void;
 }) {
   const [query, setQuery] = useState("");
   const root = useRef<HTMLDivElement>(null);
@@ -47,25 +47,24 @@ function ModelMenu({ open, onOpenChange, models, model, onSelect, thinkingLevel,
     document.addEventListener("keydown", escape);
     return () => { document.removeEventListener("mousedown", close); document.removeEventListener("keydown", escape); };
   }, [open, onOpenChange]);
-  // Models the runtime cannot chat with (e.g. translation-only offerings) are not offered here.
-  const usable = models.filter(item => item.available !== false);
-  const visible = usable.filter(item => `${item.provider} ${item.name} ${item.id}`.toLowerCase().includes(query.toLowerCase()));
+  // Exactly the session runtime's list: what it offers can be chosen.
+  const visible = models.filter(item => `${item.provider} ${item.name} ${item.id}`.toLowerCase().includes(query.toLowerCase()));
   const providers = [...new Set(visible.map(item => item.provider))];
   return <div ref={root} className="relative">
-    <Button type="button" variant="ghost" className="h-8 gap-1 px-2 text-xs" aria-label="Model" aria-expanded={open} onClick={() => { const next = !open; onOpenChange(next); if (next) { setQuery(""); onOpen?.(); } }}>
-      <Cpu className="size-4 shrink-0" aria-hidden="true" />
-      <span className="max-w-40 truncate">{model ?? "Select model"}</span>
+    {/* The button is the model's state: loading, the model, or the way to get one. */}
+    <Button type="button" variant="ghost" className="h-8 gap-1 px-2 text-xs" aria-label="Model" aria-expanded={open} disabled={state === "resolving"} onClick={() => { if (state === "none" && !models.length) { onSetup?.(); return; } const next = !open; onOpenChange(next); if (next) setQuery(""); }}>
+      {state === "resolving" ? <Loader2 className="size-4 shrink-0 animate-spin" aria-hidden="true" /> : <Cpu className="size-4 shrink-0" aria-hidden="true" />}
+      <span className="max-w-40 truncate">{state === "ready" ? model : state === "none" ? (models.length ? "Select model" : "Set up a model") : ""}</span>
       <ChevronDown className="size-3 shrink-0" aria-hidden="true" />
     </Button>
     {open && <div role="menu" aria-label="Model selection" className="absolute bottom-full right-0 z-30 mb-2 w-80 max-w-[calc(100vw-2rem)] rounded-xl border border-border bg-popover p-2 shadow-xl">
       <Input autoFocus aria-label="Search models" placeholder="Search models" value={query} onChange={event => setQuery(event.target.value)} className="mb-2" />
       <div className="max-h-72 overflow-y-auto">
-        {!usable.length && <div className="px-2 py-3"><p className="text-sm text-muted-foreground">No models available. Configure a provider in Settings.</p>{onRetry && <Button type="button" variant="outline" className="mt-2 h-7 px-2 text-xs" onClick={onRetry}>Retry models</Button>}</div>}
-        {!!usable.length && !visible.length && <p className="px-2 py-3 text-sm text-muted-foreground">No matching models</p>}
+        {!!models.length && !visible.length && <p className="px-2 py-3 text-sm text-muted-foreground">No matching models</p>}
         {providers.map(provider => <section key={provider} className="mb-2">
           <h3 className="px-2 pb-1 pt-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">{providerLabel(provider)}</h3>
-          {visible.filter(item => item.provider === provider).map(item => <button key={`${item.provider}/${item.id}`} type="button" role="menuitemradio" aria-checked={item.name === model} disabled={item.available === false} title={item.available === false ? item.unavailableReason ?? undefined : undefined} onClick={() => { onSelect(item.provider, item.id); onOpenChange(false); }} className="flex w-full items-center justify-between gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-accent focus-visible:bg-accent disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent">
-            <span className="min-w-0 flex-1"><span className="block truncate">{item.name}</span>{item.available === false ? <span className="block truncate text-[10px] text-muted-foreground">{item.unavailableReason ?? "Not available"}</span> : modelDetails(item) && <span className="block truncate text-[10px] text-muted-foreground">{modelDetails(item)}</span>}</span>
+          {visible.filter(item => item.provider === provider).map(item => <button key={`${item.provider}/${item.id}`} type="button" role="menuitemradio" aria-checked={item.name === model} onClick={() => { onSelect(item.provider, item.id); onOpenChange(false); }} className="flex w-full items-center justify-between gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-accent focus-visible:bg-accent disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent">
+            <span className="min-w-0 flex-1"><span className="block truncate">{item.name}</span>{modelDetails(item) && <span className="block truncate text-[10px] text-muted-foreground">{modelDetails(item)}</span>}</span>
             {item.name === model && <span className="shrink-0 text-xs text-primary">Current</span>}
           </button>)}
         </section>)}
@@ -161,9 +160,11 @@ export interface ComposerProps {
   attachmentError?: string | null;
   models: readonly ChatModel[];
   model?: string;
+  /** The session's model as its runtime reports it; nothing is sent unless `ready`. */
+  modelState: ModelState;
   onSelectModel: (provider: string, id: string) => void;
-  onRefreshModels?: () => void;
-  onRetryModels?: () => void;
+  /** No model and nothing to choose from: where models are set up. */
+  onSetupModel?: () => void;
   thinkingLevel?: string;
   thinkingLevels: readonly string[];
   onThinkingLevel: (level: string) => void;
@@ -191,7 +192,7 @@ function TextGuardControl({ control }: { control: NonNullable<ComposerProps["tex
     </div>}
   </div>;
 }
-export function Composer({ hero = false, autoFocus = false, textguard, connected, pending, settling = false, opening = false, starting = false, unavailable = false, running, draft, onDraft, onSend, onStop, onCompact, onExport, onReloadMcp, attachments = [], onAddImages, onRemoveImage, readingImages = false, attachmentError, videos = [], onAddVideo, onRemoveVideo, models, model, onSelectModel, onRefreshModels, onRetryModels, thinkingLevel, thinkingLevels, onThinkingLevel }: ComposerProps) {
+export function Composer({ hero = false, autoFocus = false, textguard, connected, pending, settling = false, opening = false, starting = false, unavailable = false, running, draft, onDraft, onSend, onStop, onCompact, onExport, onReloadMcp, attachments = [], onAddImages, onRemoveImage, readingImages = false, attachmentError, videos = [], onAddVideo, onRemoveVideo, models, model, modelState, onSelectModel, onSetupModel, thinkingLevel, thinkingLevels, onThinkingLevel }: ComposerProps) {
   const active = running || starting;
   const imageInput = useRef<HTMLInputElement>(null);
   const [addOpen, setAddOpen] = useState(false);
@@ -199,9 +200,10 @@ export function Composer({ hero = false, autoFocus = false, textguard, connected
   const [videoDraft, setVideoDraft] = useState("");
   const [videoError, setVideoError] = useState<string | null>(null);
   const [modelOpen, setModelOpen] = useState(false);
-  // No model is not a reason to swallow the press: the send says why above the
-  // composer (#99). A disabled button with no reason looked broken.
-  const submit = () => { if ((connected || opening) && !unavailable && !readingImages && (draft.trim() || videos.length) && (running || starting || !pending)) onSend(); };
+  // Nothing is sent without the runtime's model; the model button next to
+  // Send shows why (loading, or the way to set one up).
+  const noModel = modelState !== "ready";
+  const submit = () => { if ((connected || opening) && !noModel && !unavailable && !readingImages && (draft.trim() || videos.length) && (running || starting || !pending)) onSend(); };
   const compactDisabled = !connected || pending || settling || opening || unavailable || running;
   const exportDisabled = !connected || pending || settling || opening || unavailable;
   const [commandIndex, setCommandIndex] = useState(0);
@@ -255,9 +257,9 @@ export function Composer({ hero = false, autoFocus = false, textguard, connected
         </div>
         <div className="flex shrink-0 items-center gap-2">
           <span className="hidden text-xs text-muted-foreground lg:inline">{!connected ? "Connecting…" : unavailable ? "Session unavailable" : opening ? "Opening session…" : starting ? "Starting…" : pending ? "Sending…" : running ? "Enter to steer: Jouzu reads it at its next step" : "Enter to send · Shift+Enter for newline"}</span>
-          <ModelMenu open={modelOpen} onOpenChange={setModelOpen} models={models} model={model} onSelect={onSelectModel} onOpen={onRefreshModels} onRetry={onRetryModels} thinkingLevel={thinkingLevel} thinkingLevels={thinkingLevels} onThinking={onThinkingLevel} />
+          <ModelMenu open={modelOpen} onOpenChange={setModelOpen} models={models} model={model} state={modelState} onSelect={onSelectModel} onSetup={onSetupModel} thinkingLevel={thinkingLevel} thinkingLevels={thinkingLevels} onThinking={onThinkingLevel} />
           {active && <Button type="button" variant="outline" className="h-8 px-2" onClick={onStop}><Square className="size-3.5" />Stop</Button>}
-          <Button type="submit" className="h-8 px-2" disabled={(!connected && !opening) || (pending && !running && !starting) || unavailable || readingImages || !draft.trim()}><Send className="size-3.5" />{running ? "Steer" : "Send"}</Button>
+          <Button type="submit" className="h-8 px-2" disabled={(!connected && !opening) || noModel || (pending && !running && !starting) || unavailable || readingImages || !draft.trim()}><Send className="size-3.5" />{running ? "Steer" : "Send"}</Button>
         </div>
       </div>
     </form>

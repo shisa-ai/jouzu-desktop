@@ -6,7 +6,6 @@ export interface ControlState {
   customProviders: { id: string; url: string; model: string; editable: boolean; imageInput?: boolean; contextWindow?: number; maxTokens?: number }[];
   providers: { id: string; name: string; oauth?: boolean; oauthName?: string; apiKey?: boolean }[];
   credentials: { providerId: string }[];
-  models: { provider: string; id: string; name: string }[];
   defaultProvider?: string;
   defaultModel?: string;
   /** The last catalog refresh: what happened, and a held revision when one waits. */

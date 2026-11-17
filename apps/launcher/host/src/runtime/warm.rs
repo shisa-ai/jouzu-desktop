@@ -647,6 +647,16 @@ impl WarmPool {
         })
     }
 
+    /// A started runtime nobody has taken yet, to ask about itself (the models
+    /// it registered) without attaching it to a session.
+    pub fn ready_runtime(&self) -> Option<Arc<RuntimeSupervisor>> {
+        self.lock()
+            .slots
+            .iter()
+            .find(|slot| slot.ready_ms.is_some())
+            .map(|slot| slot.runtime.clone())
+    }
+
     /// The folder the pool warms most for: the most recent one.
     pub fn target(&self) -> Option<PathBuf> {
         self.lock().recent.first().cloned()

@@ -8,7 +8,7 @@
 
 use std::{path::PathBuf, sync::Arc};
 
-use jouzu_host::{control::ControlManager, models::Models};
+use jouzu_host::control::ControlManager;
 use serde_json::json;
 
 fn app_dir() -> Option<PathBuf> {
@@ -35,31 +35,6 @@ fn manager(app: &PathBuf, home: &PathBuf) -> Arc<ControlManager> {
 }
 
 #[tokio::test]
-async fn available_models_include_thinking_levels() {
-    let Some(app) = app_dir() else { return };
-    let Some(home) = std::env::var_os("JOUZU_HOST_TEST_HOME").map(PathBuf::from) else {
-        eprintln!("skipped: set JOUZU_HOST_TEST_HOME to a real JOUZU_HOME with models");
-        return;
-    };
-    let manager = manager(&app, &home);
-
-    let value = manager
-        .request(json!({ "action": "available-models" }))
-        .await
-        .expect("available-models");
-    let models = value["models"].as_array().expect("models array");
-    assert!(!models.is_empty(), "no models: {value}");
-    for model in models {
-        assert!(
-            model["thinkingLevels"].is_array(),
-            "thinkingLevels missing: {model}"
-        );
-        assert!(model["provider"].is_string(), "provider missing: {model}");
-        assert!(model["id"].is_string(), "id missing: {model}");
-    }
-}
-
-#[tokio::test]
 async fn status_runs_the_real_adapter() {
     let Some(app) = app_dir() else { return };
     let temp = tempfile::tempdir().unwrap();
@@ -75,12 +50,12 @@ async fn status_runs_the_real_adapter() {
         .expect("status");
 
     assert_eq!(value["schemaVersion"], 1, "unexpected status payload: {value}");
-    assert!(value["models"].is_array(), "models is not an array: {value}");
+    // Models are each runtime's answer, not configuration status.
+    assert!(value.get("models").is_none(), "status lists models: {value}");
     assert!(
         value["providers"].is_array(),
         "providers is not an array: {value}"
     );
-    eprintln!("status models: {}", value["models"]);
 }
 
 #[tokio::test]
@@ -107,45 +82,4 @@ async fn cancelling_idle_control_is_a_no_op() {
     assert!(!manager.cancel(Some("c-never-started")));
 }
 
-#[tokio::test]
-async fn models_snapshot_comes_from_the_real_adapter() {
-    let Some(app) = app_dir() else { return };
-    let temp = tempfile::tempdir().unwrap();
-    let home = match std::env::var_os("JOUZU_HOST_TEST_HOME") {
-        Some(value) => PathBuf::from(value),
-        None => {
-            eprintln!("skipped: set JOUZU_HOST_TEST_HOME to a real JOUZU_HOME with models");
-            return;
-        }
-    };
-    let control = manager(&app, &home);
-    let cache = temp.path().join("host");
-    let models = Models::new(&cache);
-
-    let snapshot = models.get(&control).await.expect("model snapshot");
-    let list = snapshot["models"].as_array().expect("models array");
-    assert!(!list.is_empty(), "adapter returned no models: {snapshot}");
-    assert!(snapshot["generatedAt"].is_string());
-    assert_eq!(snapshot["stale"], false);
-    let first = &list[0];
-    assert!(first["provider"].is_string() && first["id"].is_string() && first["name"].is_string());
-    assert!(cache.join("host-state").join("models.json").is_file(), "snapshot was not cached");
-
-    // A second read is served from the cache: no adapter process is needed.
-    let cached = models.get(&control).await.expect("cached snapshot");
-    assert_eq!(cached["generatedAt"], snapshot["generatedAt"]);
-}
-
-#[tokio::test]
-async fn a_fresh_home_has_no_usable_model() {
-    let Some(app) = app_dir() else { return };
-    let temp = tempfile::tempdir().unwrap();
-    let control = manager(&app, &temp.path().to_path_buf());
-    let models = Models::new(temp.path());
-
-    // No provider is configured in a fresh home; the host must say so instead of
-    // exposing the unconfigured global catalog as selectable models.
-    let error = models.get(&control).await.expect_err("fresh home has no model");
-    assert_eq!(error.code, "models-unavailable", "{error:?}");
-}
 

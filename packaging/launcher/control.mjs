@@ -201,77 +201,12 @@ try {
     if (!runtime.getProvider(request.provider)) throw new Error('Unknown provider');
     await auth.delete(request.provider);
   } else if (request.action === 'default-model') {
-    if (!runtime.getModel(request.provider, request.model)) throw new Error('Unknown model');
+    // Which models exist is the runtime's answer (its own model list); this
+    // only checks the shape before writing the setting.
+    const name = value => typeof value === 'string' && value.length > 0 && value.length <= 256 && ![...value].some(c => c.charCodeAt(0) < 32);
+    if (!name(request.provider) || !name(request.model)) throw new Error('Invalid model');
     settings.setDefaultModelAndProvider(request.provider, request.model);
     await settings.flush();
-  } else if (request.action === 'available-models') {
-    const { loadActiveModelCatalogs } = await load('model-catalog-sync');
-    const { catalogRuntimeProvider } = await load('model-catalog-projection');
-    const { getSupportedThinkingLevels } = await import(pathToFileURL(join(appRoot, 'node_modules/@earendil-works/pi-ai/dist/models.js')));
-    const catalogModels = [];
-    for (const { source, document } of loadActiveModelCatalogs(paths)) {
-      if (typeof document?.catalogId !== 'string') continue;
-      for (const offering of document?.modelOfferings ?? []) {
-        if (typeof offering?.providerId !== 'string' || typeof offering?.modelId !== 'string') continue;
-        catalogModels.push({
-          offering,
-          provider: catalogRuntimeProvider(document.catalogId, offering.providerId, source?.url),
-        });
-      }
-    }
-    // Availability is what the user can actually run, not the full catalog:
-    // unconfigured providers must not appear in the desktop model menu.
-    const available = await runtime.getAvailable();
-    const models = [];
-    const seen = new Set();
-    const add = (model) => {
-      const key = `${model.provider}/${model.id}`;
-      if (seen.has(key)) return;
-      seen.add(key);
-      models.push(model);
-    };
-    // Catalog offerings are registered in the runtime under the stable
-    // `catalog:<catalogId>:<provider>` identity, not the display name.
-    for (const { offering, provider } of catalogModels) {
-      const limits = offering.limits ?? {};
-      const price = offering.metadata?.price;
-      const cost = price && ['input', 'output', 'cacheRead', 'cacheWrite'].some(key => typeof price[key] === 'number')
-        ? Object.fromEntries(['input', 'output', 'cacheRead', 'cacheWrite'].filter(key => typeof price[key] === 'number').map(key => [key, price[key]]))
-        : null;
-      const levels = Array.isArray(offering.supportedThinkingLevels) && offering.supportedThinkingLevels.length
-        ? offering.supportedThinkingLevels.filter(level => typeof level === 'string')
-        : ['off'];
-      add({
-        provider,
-        id: offering.modelId,
-        name: typeof offering.name === 'string' ? offering.name : offering.modelId,
-        contextWindow: typeof limits.contextWindow === 'number' ? limits.contextWindow : null,
-        maxTokens: typeof limits.maxOutputTokens === 'number' ? limits.maxOutputTokens : null,
-        cost,
-        reasoning: Array.isArray(offering.capabilities) && offering.capabilities.includes('reasoning') || levels.length > 1,
-        thinkingLevels: levels,
-      });
-    }
-    for (const model of available) {
-      add({
-        provider: model.provider,
-        id: model.id,
-        name: model.name,
-        contextWindow: model.contextWindow ?? null,
-        maxTokens: model.maxTokens ?? null,
-        cost: model.cost && (model.cost.input || model.cost.output) ? model.cost : null,
-        reasoning: !!model.reasoning,
-        thinkingLevels: getSupportedThinkingLevels(model),
-      });
-    }
-    console.log(JSON.stringify({
-      schemaVersion: 1,
-      generatedAt: new Date().toISOString(),
-      models,
-      defaultProvider: settings.getDefaultProvider() ?? null,
-      defaultModel: settings.getDefaultModel() ?? null,
-    }));
-    process.exit(0);
   } else if (request.action !== 'status') throw new Error('Unsupported operation');
   if (request.action === "custom-provider") await runtime.refresh({ allowNetwork: false });
   const { ModelConfig } = await pi('model-config');
@@ -298,7 +233,7 @@ try {
   // Readiness means the user has configured a usable model source, matching the
   // conditions Jouzu's own doctor reports as "provider.unconfigured".
   const modelReady = account.signedIn || credentials.length > 0 || customProviders.length > 0;
-  console.log(JSON.stringify({ schemaVersion: 1, modelReady, ...(catalog ? { catalog } : {}), language, profile: readProfileChoice(profilePath)?.profile ?? null, account, customProviders, providers: runtime.getProviders().map(p => ({ id: p.id, name: p.id === 'openai-codex' ? 'Codex' : (p.name ?? p.id), oauth: !!p.auth?.oauth, oauthName: p.auth?.oauth?.name, apiKey: !!p.auth?.apiKey })), credentials, models: runtime.getModels().map(m => ({ provider: m.provider, id: m.id, name: m.name })), defaultProvider: settings.getDefaultProvider(), defaultModel: settings.getDefaultModel() }));
+  console.log(JSON.stringify({ schemaVersion: 1, modelReady, ...(catalog ? { catalog } : {}), language, profile: readProfileChoice(profilePath)?.profile ?? null, account, customProviders, providers: runtime.getProviders().map(p => ({ id: p.id, name: p.id === 'openai-codex' ? 'Codex' : (p.name ?? p.id), oauth: !!p.auth?.oauth, oauthName: p.auth?.oauth?.name, apiKey: !!p.auth?.apiKey })), credentials, defaultProvider: settings.getDefaultProvider(), defaultModel: settings.getDefaultModel() }));
 } catch {
   // Do not relay raw upstream errors: they can contain credentials or server input.
   const messages = {

@@ -338,7 +338,14 @@ function run(text, images) {
   beginTurn(text);
 }
 
-let currentModel = { name: "fixture-model", provider: "fixture", id: "model" };
+// Like the runtime: the models it registered, the one it uses (none when
+// FAKE_RUNTIME_NO_MODEL is set: nothing is configured) and the level.
+const fixtureModels = [
+  { name: "fixture-model", provider: "fixture", id: "model" },
+  { name: "Fixture Other", provider: "fixture", id: "other" },
+];
+let currentModel = process.env.FAKE_RUNTIME_NO_MODEL ? null : fixtureModels[0];
+let currentLevel = "off";
 
 const lines = readline.createInterface({ input: process.stdin });
 if (process.env.FAKE_RUNTIME_IGNORE_STDIN === "1") {
@@ -368,14 +375,14 @@ lines.on("line", line => {
       response(value.id, "get_messages", { messages });
       break;
     case "get_state":
-      response(value.id, "get_state", { sessionId: "fixture", isStreaming: busy, model: currentModel, thinkingLevel: "off", sessionFile: null });
+      response(value.id, "get_state", { sessionId: "fixture", isStreaming: busy, model: currentModel, thinkingLevel: currentLevel, sessionFile: null });
       selfRunWhen("ready");
       break;
     case "get_available_models":
-      response(value.id, "get_available_models", { models: [] });
+      response(value.id, "get_available_models", { models: process.env.FAKE_RUNTIME_NO_MODEL ? [] : fixtureModels });
       break;
     case "get_available_thinking_levels":
-      response(value.id, "get_available_thinking_levels", { levels: ["off"] });
+      response(value.id, "get_available_thinking_levels", { levels: ["off", "low", "high"] });
       break;
     case "set_model":
       if (typeof value.modelId !== "string") {
@@ -386,11 +393,17 @@ lines.on("line", line => {
         failure(value.id, "set_model", "Model not found: missing");
         break;
       }
-      currentModel = { name: "fixture-model", provider: String(value.provider ?? "fixture"), id: value.modelId };
-      response(value.id, "set_model", { model: currentModel });
+      currentModel = fixtureModels.find(model => model.provider === value.provider && model.id === value.modelId)
+        ?? { name: value.modelId, provider: String(value.provider ?? "fixture"), id: value.modelId };
+      // The runtime answers with the model itself.
+      response(value.id, "set_model", currentModel);
       break;
     case "set_thinking_level":
-      response(value.id, "set_thinking_level", { level: String(value.level ?? "off") });
+      if (String(value.level) !== currentLevel) {
+        currentLevel = String(value.level ?? "off");
+        out({ type: "thinking_level_changed", level: currentLevel });
+      }
+      response(value.id, "set_thinking_level");
       break;
     case "switch_session":
       // FAKE_RUNTIME_EXIT_ON_SWITCH_ONCE names a marker file: the first runtime to
