@@ -3705,13 +3705,19 @@ mod session_tests {
             .unwrap();
         wait_status(&session, Status::Idle).await;
         session.send("mine", "hello").unwrap();
+        // The runtime's own run displaces the prompt for 500 ms: it waits as "delivering".
         wait_until(|| session.summary()["queue"][0]["state"] == "delivering").await;
-        wait_until(|| session.summary()["activeTurn"]["clientMessageId"] == "mine").await;
-        wait_until(|| session.status() == Status::Idle).await;
+        // The prompt's own run is short (a few 15 ms steps), too short to catch
+        // by polling on a loaded machine. Wait for its outcome instead: it was
+        // the run's own message, after the runtime's reply, then answered.
+        wait_until(|| {
+            session.status() == Status::Idle
+                && conversation(&session) == vec!["assistant:ok", "user:hello", "assistant:hello"]
+        })
+        .await;
         let summary = session.summary();
         assert!(summary["failedTurn"].is_null() && summary["queue"].as_array().is_some_and(Vec::is_empty), "{summary}");
-        let rows = conversation(&session);
-        assert_eq!(rows, vec!["assistant:ok", "user:hello", "assistant:hello"], "{rows:?}");
+
         assert_eq!(std::fs::read_to_string(&steer_log).unwrap_or_default(), "", "never steered");
     }
 
