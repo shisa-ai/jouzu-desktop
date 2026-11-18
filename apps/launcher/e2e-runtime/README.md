@@ -61,8 +61,8 @@ node e2e-runtime/entry-restart.mjs
 
 Needs a model-ready throwaway home (fixture provider) and the fixture server. Sends one
 message so the workspace has an entry session, then reopens the page while the first
-session lease is held for 4 s and the startup catalog refresh reports an activated revision,
-the order of the first start after an update (#73). Passes when the loader is gone and the
+session lease is held for 4 s (#73; a catalog revision activated at startup no longer
+restarts the chat, so that half of the original order is gone). Passes when the loader is gone and the
 entry session was opened. Results are written to `entry-restart-result.json`.
 
 ## Turn files stay with their session

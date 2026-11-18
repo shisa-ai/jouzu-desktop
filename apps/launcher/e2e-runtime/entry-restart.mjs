@@ -9,10 +9,10 @@ import { tmpdir } from 'node:os';
 // Against a running host on a throwaway home (JOUZU_E2E_HOST_HOME: the host's --home,
 // model-ready with the fixture provider, fixture server running):
 //   1. send one message, so the workspace has an entry session;
-//   2. reopen with the same browser profile. The first lease is held 4 s, and the
-//      startup catalog refresh answers that a revision was activated (control status
-//      and refresh are answered from the real host's status, signed in). The loader
-//      must be gone and the entry session open.
+//   2. reopen with the same browser profile. The first lease is held 4 s. The loader
+//      must be gone and the entry session open. (A catalog revision activated at
+//      startup used to restart the chat here; configuration changes no longer
+//      restart sessions, so only the held lease remains of that order.)
 // It never touches the user's data folder or contacts a real provider.
 const hostHome = process.env.JOUZU_E2E_HOST_HOME;
 if (!hostHome) {
@@ -57,13 +57,6 @@ async function open() {
   await page.route('**/v1/sessions', async route => {
     if (!held && route.request().method() === 'POST') { held = true; await new Promise(resolve => setTimeout(resolve, 4_000)); }
     await route.fallback();
-  });
-  await page.route('**/v1/control', async route => {
-    const action = route.request().postDataJSON()?.action;
-    const status = await (await route.fetch({ postData: JSON.stringify({ action: 'status' }) })).json();
-    status.account = { ...status.account, signedIn: true };
-    if (action === 'refresh-catalogs') status.catalog = { status: 'ok', sources: [{ sourceId: 'ai.shisa.api-router', status: 'activated' }], held: null };
-    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(status) });
   });
   await page.goto(base);
   await page.waitForTimeout(15_000);
