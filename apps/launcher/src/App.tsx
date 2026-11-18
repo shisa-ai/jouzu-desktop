@@ -41,6 +41,7 @@ import { Button } from "./components/ui/button";
 import { JouzuLoader } from "./components/ui/jouzu-loader";
 import { Progress } from "./components/ui/progress";
 import { catalogReview, messages, locales, resolveLocale, type Locale } from "./i18n";
+import { ChatTextProvider, chatTexts } from "./chat-text";
 import { type Workspace } from "./history";
 import { parseDiagnostics, type Diagnostics } from "./diagnostics";
 import { copyText } from "./secure-context";
@@ -747,7 +748,7 @@ export function App() {
         entryWarm?.state === "starting" && entryWarm.since !== null ? t.warming.replace("{s}", String(Math.max(0, Math.round((bootNow - entryWarm.since) / 1000)))) : t.connecting,
         entryWarm?.state === "failed" ? { message: t.warmingFailed, detail: entryWarm.error ?? "", onRetry: () => retryEntryWarm.current() } : undefined,
       )}
-    {activePath && <div className="flex min-h-0 flex-1">
+    {activePath && <div className="flex min-h-0 flex-1"><ChatTextProvider value={chatTexts[locale]}>
       <ChatWorkspace
         path={activePath}
         revision={sessionRevision}
@@ -774,7 +775,7 @@ export function App() {
         updateAvailable={!!(updater.version || jouzuUpdater.version)}
         updateBusy={updater.busy || jouzuUpdater.busy}
       />
-    </div>}
+    </ChatTextProvider></div>}
     {!activePath && <LauncherPage title={t.heading} description={t.intro}>
       {error?.place === "folders" && <div className="mx-auto w-full max-w-xl px-6 pt-6">{errorNotice("folders")}</div>}
       <div className="flex min-h-0 flex-1 items-center justify-center gap-2 p-6"><Button onClick={() => void chooseFolder()} disabled={!state || busy}><Plus />{t.addFolder}</Button><Button variant="outline" onClick={() => setSettingsOpen(true)}>{t.settings}</Button></div>

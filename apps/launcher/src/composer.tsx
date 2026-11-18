@@ -6,6 +6,7 @@ import type { TextGuardMode } from "./session-notices";
 import { Button } from "./components/ui/button";
 import { Input } from "./components/ui/input";
 import { providerLabel } from "./provider-label";
+import { ResultMark, DetailsPopover, type ControlResult, type SessionControl } from "./control-result";
 
 
 function tokenLabel(tokens: number) {
@@ -25,7 +26,7 @@ function modelDetails(model: ChatModel) {
   return [...limits, ...prices].join(" · ");
 }
 
-function ModelMenu({ open, onOpenChange, models, model, state, onSelect, thinkingLevel, thinkingLevels, onThinking, onSetup }: {
+function ModelMenu({ open, onOpenChange, models, model, state, onSelect, thinkingLevel, thinkingLevels, onThinking, onSetup, result }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   models: readonly ChatModel[];
@@ -36,6 +37,8 @@ function ModelMenu({ open, onOpenChange, models, model, state, onSelect, thinkin
   thinkingLevels: readonly string[];
   onThinking: (level: string) => void;
   onSetup?: () => void;
+  /** The last model or level change, when it did not take effect. */
+  result?: ControlResult;
 }) {
   const [query, setQuery] = useState("");
   const root = useRef<HTMLDivElement>(null);
@@ -50,8 +53,9 @@ function ModelMenu({ open, onOpenChange, models, model, state, onSelect, thinkin
   // Exactly the session runtime's list: what it offers can be chosen.
   const visible = models.filter(item => `${item.provider} ${item.name} ${item.id}`.toLowerCase().includes(query.toLowerCase()));
   const providers = [...new Set(visible.map(item => item.provider))];
-  return <div ref={root} className="relative">
+  return <div ref={root} className="relative flex items-center">
     {/* The button is the model's state: loading, the model, or the way to get one. */}
+    <ResultMark result={result} />
     <Button type="button" variant="ghost" className="h-8 gap-1 px-2 text-xs" aria-label="Model" aria-expanded={open} disabled={state === "resolving"} onClick={() => { if (state === "none" && !models.length) { onSetup?.(); return; } const next = !open; onOpenChange(next); if (next) setQuery(""); }}>
       {state === "resolving" ? <Loader2 className="size-4 shrink-0 animate-spin" aria-hidden="true" /> : <Cpu className="size-4 shrink-0" aria-hidden="true" />}
       <span className="max-w-40 truncate">{state === "ready" ? model : state === "none" ? (models.length ? "Select model" : "Set up a model") : ""}</span>
@@ -77,7 +81,7 @@ function ModelMenu({ open, onOpenChange, models, model, state, onSelect, thinkin
   </div>;
 }
 
-function AddMenu({ open, onOpenChange, onAddImage, onCompact, onModel, onExport, onReloadMcp, compactDisabled, exportDisabled }: {
+function AddMenu({ open, onOpenChange, onAddImage, onCompact, onModel, onExport, onReloadMcp, compactDisabled, exportDisabled, result }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onAddImage?: () => void;
@@ -87,6 +91,8 @@ function AddMenu({ open, onOpenChange, onAddImage, onCompact, onModel, onExport,
   onReloadMcp?: () => void;
   compactDisabled: boolean;
   exportDisabled: boolean;
+  /** What the last command run from here (compact, export, reload) did. */
+  result?: ControlResult;
 }) {
   const root = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -98,7 +104,7 @@ function AddMenu({ open, onOpenChange, onAddImage, onCompact, onModel, onExport,
     return () => { document.removeEventListener("mousedown", close); document.removeEventListener("keydown", escape); };
   }, [open, onOpenChange]);
   const item = "flex w-full items-start gap-3 rounded-lg px-2 py-2 text-left hover:bg-accent focus-visible:bg-accent disabled:pointer-events-none disabled:opacity-45";
-  return <div ref={root} className="relative">
+  return <div ref={root} className="relative flex items-center">
     <Button type="button" variant="ghost" className="size-8 p-0" aria-label="Add files or run commands" aria-haspopup="menu" aria-expanded={open} onClick={() => onOpenChange(!open)}>
       <Plus className="size-4" />
     </Button>
@@ -126,6 +132,7 @@ function AddMenu({ open, onOpenChange, onAddImage, onCompact, onModel, onExport,
         <span className="min-w-0"><span className="block text-sm">Reload MCP</span><span className="block text-xs text-muted-foreground">Rebind MCP servers and extensions</span></span>
       </button>
     </div>}
+    <ResultMark result={result} align="left" />
   </div>;
 }
 
@@ -135,6 +142,14 @@ export interface ComposerProps {
   autoFocus?: boolean;
   /** TextGuard's three modes; `alert` marks content it withheld. */
   textguard?: { mode: TextGuardMode; alert: boolean; disabled: boolean; onMode: (mode: TextGuardMode) => void };
+  /**
+   * The session was ended by an error (or cannot take another message): the
+   * composer's place shows why, with the one action that recovers. The only
+   * thing that ever replaces the composer, and only one at a time.
+   */
+  blocked?: { text: string; details?: string; action?: { label: string; run: () => void; disabled?: boolean } } | null;
+  /** What the last use of each control did, shown at that control. */
+  results?: Partial<Record<SessionControl, ControlResult>>;
   connected: boolean;
   pending: boolean;
   /** A setting (such as the model) is being applied: a send waits for it, other actions wait. */
@@ -174,7 +189,7 @@ const TEXTGUARD_MODES: Array<{ mode: TextGuardMode; label: string; description: 
   { mode: "strict", label: "Strict", description: "Flagged content is withheld" },
   { mode: "off", label: "Off", description: "Content is admitted unscanned" },
 ];
-function TextGuardControl({ control }: { control: NonNullable<ComposerProps["textguard"]> }) {
+function TextGuardControl({ control, result }: { control: NonNullable<ComposerProps["textguard"]>; result?: ControlResult }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -185,14 +200,15 @@ function TextGuardControl({ control }: { control: NonNullable<ComposerProps["tex
   }, [open]);
   const current = TEXTGUARD_MODES.find(item => item.mode === control.mode) ?? TEXTGUARD_MODES[0]!;
   const tone = control.alert ? "text-destructive hover:bg-destructive/10 hover:text-destructive" : control.mode === "off" ? "text-amber-600" : "text-muted-foreground";
-  return <div ref={ref} className="relative">
+  return <div ref={ref} className="relative flex items-center">
     <Button type="button" variant="ghost" className={`h-8 gap-1.5 px-2 text-xs ${tone}`} disabled={control.disabled} aria-expanded={open} aria-haspopup="menu" aria-label={`TextGuard: ${current.label}`} title={`TextGuard: ${current.description}`} onClick={() => setOpen(value => !value)}><ShieldAlert className="size-4" />{control.mode === "on" ? "TextGuard" : `TextGuard ${current.label}`}<ChevronDown className="size-3" /></Button>
     {open && <div role="menu" aria-label="TextGuard mode" className="absolute bottom-full left-0 z-40 mb-1 w-64 rounded-lg border border-border bg-popover p-1 shadow-xl">
       {TEXTGUARD_MODES.map(item => <button key={item.mode} type="button" role="menuitemradio" aria-checked={control.mode === item.mode} onClick={() => { setOpen(false); if (item.mode !== control.mode) control.onMode(item.mode); }} className="flex w-full items-start gap-2 rounded-md px-2 py-1.5 text-left hover:bg-accent"><span className="min-w-0 flex-1"><span className="block text-sm">{item.label}</span><span className="block text-xs text-muted-foreground">{item.description}</span></span>{control.mode === item.mode && <Check className="mt-1 size-3.5" />}</button>)}
     </div>}
+    <ResultMark result={result} align="left" />
   </div>;
 }
-export function Composer({ hero = false, autoFocus = false, textguard, connected, pending, settling = false, opening = false, starting = false, unavailable = false, running, draft, onDraft, onSend, onStop, onCompact, onExport, onReloadMcp, attachments = [], onAddImages, onRemoveImage, readingImages = false, attachmentError, videos = [], onAddVideo, onRemoveVideo, models, model, modelState, onSelectModel, onSetupModel, thinkingLevel, thinkingLevels, onThinkingLevel }: ComposerProps) {
+export function Composer({ hero = false, autoFocus = false, textguard, blocked, results = {}, connected, pending, settling = false, opening = false, starting = false, unavailable = false, running, draft, onDraft, onSend, onStop, onCompact, onExport, onReloadMcp, attachments = [], onAddImages, onRemoveImage, readingImages = false, attachmentError, videos = [], onAddVideo, onRemoveVideo, models, model, modelState, onSelectModel, onSetupModel, thinkingLevel, thinkingLevels, onThinkingLevel }: ComposerProps) {
   const active = running || starting;
   const imageInput = useRef<HTMLInputElement>(null);
   const [addOpen, setAddOpen] = useState(false);
@@ -228,6 +244,19 @@ export function Composer({ hero = false, autoFocus = false, textguard, connected
     event.preventDefault();
     onAddImages(files);
   };
+  const frame = `relative mx-auto flex max-w-3xl flex-col gap-2 border border-border bg-card shadow-[0_8px_30px_rgba(0,0,0,0.12)] ${hero ? "rounded-3xl p-3" : "rounded-2xl p-2.5"}`;
+  if (blocked) {
+    // The same frame and height as the composer it replaces: nothing moves.
+    return <div className={hero ? "px-0 pb-0 pt-0" : "px-3 pb-3 pt-2 sm:px-6"}>
+      <div role="alert" aria-label="Session ended" data-session-blocked className={frame}>
+        <div className="flex min-h-[6.5rem] items-center gap-2 px-1">
+          <span className="min-w-0 flex-1 break-words text-sm">{blocked.text}</span>
+          {blocked.details && <DetailsPopover details={blocked.details} />}
+          {blocked.action && <Button type="button" className="h-8 shrink-0 px-3" disabled={blocked.action.disabled} onClick={blocked.action.run}>{blocked.action.label}</Button>}
+        </div>
+      </div>
+    </div>;
+  }
   return <div className={hero ? "px-0 pb-0 pt-0" : "px-3 pb-3 pt-2 sm:px-6"}>
     <form aria-label="Message composer" onPaste={pasteFiles} className={`relative mx-auto flex max-w-3xl flex-col gap-2 border border-border bg-card shadow-[0_8px_30px_rgba(0,0,0,0.12)] focus-within:ring-1 focus-within:ring-ring ${hero ? "rounded-3xl p-3" : "rounded-2xl p-2.5"}`} onSubmit={event => { event.preventDefault(); submit(); }}>
       {attachmentError && <p role="alert" className="px-1 text-sm text-destructive">{attachmentError}</p>}
@@ -251,14 +280,16 @@ export function Composer({ hero = false, autoFocus = false, textguard, connected
         <div className="flex min-w-0 items-center gap-1">
           {onAddImages && <><input ref={imageInput} type="file" accept={IMAGE_ACCEPT} multiple className="hidden" aria-label="Choose images" onChange={event => { const files = Array.from(event.currentTarget.files ?? []); event.currentTarget.value = ""; onAddImages(files); }} /></>}
           {onAddVideo && <Button type="button" variant="ghost" className="size-8 p-0" aria-label="Add video URL" title="Add video URL" onClick={() => setVideoOpen(value => !value)}><Video className="size-4" /></Button>}
-          <AddMenu open={addOpen} onOpenChange={setAddOpen} onAddImage={onAddImages && !readingImages && attachments.length < MAX_IMAGES ? () => imageInput.current?.click() : undefined} onCompact={onCompact} onModel={() => setModelOpen(true)} onExport={onExport} onReloadMcp={onReloadMcp} compactDisabled={compactDisabled} exportDisabled={exportDisabled || readingImages} />
-          {textguard && <TextGuardControl control={textguard} />}
+          <AddMenu open={addOpen} onOpenChange={setAddOpen} onAddImage={onAddImages && !readingImages && attachments.length < MAX_IMAGES ? () => imageInput.current?.click() : undefined} onCompact={onCompact} onModel={() => setModelOpen(true)} onExport={onExport} onReloadMcp={onReloadMcp} compactDisabled={compactDisabled} exportDisabled={exportDisabled || readingImages} result={results.commands} />
+          {textguard && <TextGuardControl control={textguard} result={results.textguard} />}
           {readingImages && <span role="status" className="text-xs text-muted-foreground">Reading images…</span>}
         </div>
         <div className="flex shrink-0 items-center gap-2">
           <span className="hidden text-xs text-muted-foreground lg:inline">{!connected ? "Connecting…" : unavailable ? "Session unavailable" : opening ? "Opening session…" : starting ? "Starting…" : pending ? "Sending…" : running ? "Enter to steer: Jouzu reads it at its next step" : "Enter to send · Shift+Enter for newline"}</span>
-          <ModelMenu open={modelOpen} onOpenChange={setModelOpen} models={models} model={model} state={modelState} onSelect={onSelectModel} onSetup={onSetupModel} thinkingLevel={thinkingLevel} thinkingLevels={thinkingLevels} onThinking={onThinkingLevel} />
+          <ModelMenu open={modelOpen} onOpenChange={setModelOpen} models={models} model={model} state={modelState} onSelect={onSelectModel} onSetup={onSetupModel} thinkingLevel={thinkingLevel} thinkingLevels={thinkingLevels} onThinking={onThinkingLevel} result={results.model} />
+          {active && <ResultMark result={results.stop} />}
           {active && <Button type="button" variant="outline" className="h-8 px-2" onClick={onStop}><Square className="size-3.5" />Stop</Button>}
+          <ResultMark result={results.send} />
           <Button type="submit" className="h-8 px-2" disabled={(!connected && !opening) || noModel || (pending && !running && !starting) || unavailable || readingImages || !draft.trim()}><Send className="size-3.5" />{running ? "Steer" : "Send"}</Button>
         </div>
       </div>

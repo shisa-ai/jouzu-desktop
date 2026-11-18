@@ -84,8 +84,11 @@ test("a failed session ends its turn, says why and restarts on request", async (
   const info = await api(`/v1/sessions/${bound.sessionId}`);
   process.kill(info.runtimePid);
 
-  const alert = page.getByText("This session stopped and needs a restart.");
+  // The one session-level error takes the composer's place: why, and the one way back.
+  const alert = page.locator("[data-session-blocked]");
   await expect(alert).toBeVisible({ timeout: 10_000 });
+  await expect(alert).toContainText("The runtime could not open this session.");
+  await expect(composer).toHaveCount(0);
   // Nothing is left waiting: no timer, no Stop.
   await expect(page.getByRole("button", { name: /^stop/i })).toHaveCount(0);
   await expect(page.getByText(/waiting for model/i)).toHaveCount(0);

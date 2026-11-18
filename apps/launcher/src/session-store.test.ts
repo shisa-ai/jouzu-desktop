@@ -222,9 +222,9 @@ describe("SessionStore", () => {
     session.cancel = async () => { throw new Error("host unreachable"); };
     const store = SessionStore.attach(session);
     const pending = store.send("hello", [], "client-1");
-    await store.stop();
+    // The failure goes back to whoever pressed Stop; it is not a session error.
+    await expect(store.stop()).rejects.toThrow("host unreachable");
     expect(store.snapshot.outbox).toMatchObject([{ clientMessageId: "client-1", text: "hello", state: "sending" }]);
-    expect(store.snapshot.error).toContain("host unreachable");
     release();
     await pending;
     expect(store.snapshot.outbox).toEqual([]);
@@ -556,5 +556,32 @@ describe("SessionStore", () => {
     store.dispose();
     store.dispose();
     expect(onDispose).toHaveBeenCalledTimes(1);
+  });
+
+  it("takes the session's one failure from the host snapshot, and nothing from a bare error event", async () => {
+    const session = fakeSession();
+    const store = SessionStore.attach(session);
+    session.emit(event(1, "error", { code: "runtime-error", message: "boom" }));
+    expect(store.snapshot.failure ?? null).toBeNull();
+    session.emit(event(2, "session.updated", { status: "error", failure: { code: "runtime-crashed", text: "runtime exited", recovery: "restart" } }));
+    expect(store.snapshot.failure).toEqual({ code: "runtime-crashed", text: "runtime exited" });
+    expect(store.snapshot.connectionError).toBeNull();
+  });
+
+  it("keeps a refused message's reason with that message", async () => {
+    const session = fakeSession();
+    const store = SessionStore.attach(session);
+    session.emit(event(1, "session.updated", { failedTurn: { clientMessageId: "c-1", text: "hello", error: { code: "prompt-refused", text: "Request history is full" } } }));
+    expect(store.snapshot.failedTurn).toEqual({ clientMessageId: "c-1", text: "hello", error: { code: "prompt-refused", text: "Request history is full" } });
+    session.emit(event(2, "session.updated", { failedTurn: null }));
+    expect(store.snapshot.failedTurn).toBeNull();
+  });
+
+  it("shows an extension's failure as the runtime's notice, not a session error", async () => {
+    const session = fakeSession();
+    const store = SessionStore.attach(session);
+    session.emit(event(1, "session.notice", { message: "flow guard crashed", level: "error", source: "extension" }));
+    expect(store.snapshot.notice).toMatchObject({ text: "flow guard crashed", level: "error", source: "extension" });
+    expect(store.snapshot.failure ?? null).toBeNull();
   });
 });

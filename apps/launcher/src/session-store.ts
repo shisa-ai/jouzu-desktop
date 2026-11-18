@@ -51,7 +51,7 @@ const emptySnapshot = (): ChatSnapshot => ({
   projection: emptyProjection(),
   connected: false,
   pending: false,
-  error: null,
+  connectionError: null,
   models: [],
   thinkingLevels: [],
   prompts: [],
@@ -62,6 +62,8 @@ const emptySnapshot = (): ChatSnapshot => ({
 
 type Data = Record<string, unknown>;
 const text = (value: unknown): string | undefined => typeof value === "string" ? value : undefined;
+/** The host's code on a refused request, when it has one. */
+const errorCode = (error: unknown): string | undefined => error && typeof error === "object" ? text((error as { code?: unknown }).code) : undefined;
 
 /** One row of the runtime's model list, as the host relays it. */
 const modelOf = (value: unknown): ChatModel | null => {
@@ -364,7 +366,6 @@ export class SessionStore {
 
   isDisposed(): boolean { return this.disposed; }
 
-  clearError(): void { this.update({ error: null }); }
 
   retryHistory(): Promise<void> { return this.refreshHistory(); }
 
@@ -443,7 +444,7 @@ export class SessionStore {
   async send(messageText: string, images: readonly ChatImage[] = [], clientMessageId: string = newId()): Promise<Receipt> {
     const existing = this.state.outbox?.find(item => item.clientMessageId === clientMessageId);
     const item: OutboxItem = existing
-      ? { ...existing, state: "sending", error: undefined }
+      ? { ...existing, state: "sending", error: undefined, code: undefined }
       : { clientMessageId, text: messageText, images: [...images], state: "sending", at: Date.now() };
     this.setOutbox([...(this.state.outbox ?? []).filter(entry => entry.clientMessageId !== clientMessageId), item]);
     if (!existing) this.markShown("message.shown", clientMessageId);
@@ -457,7 +458,7 @@ export class SessionStore {
       return receipt;
     } catch (error) {
       if (this.state.outbox?.some(entry => entry.clientMessageId === clientMessageId)) {
-        this.setOutbox((this.state.outbox ?? []).map(entry => entry.clientMessageId === clientMessageId ? { ...entry, state: "failed", error: describeError(error) } : entry));
+        this.setOutbox((this.state.outbox ?? []).map(entry => entry.clientMessageId === clientMessageId ? { ...entry, state: "failed", error: describeError(error), code: errorCode(error) } : entry));
       }
       throw error;
     }
@@ -578,15 +579,14 @@ export class SessionStore {
       const outbox = this.state.outbox ?? [];
       const restore = pending.filter(entry => !outbox.some(item => item.clientMessageId === entry.clientMessageId));
       if (restore.length) this.setOutbox([...outbox, ...restore]);
-      this.update({ error: describeError(error) });
+      throw error;
     }
   }
 
   /** Remove a waiting message; it never reaches the runtime. */
   async unqueue(clientMessageId: string): Promise<void> {
     this.waitingImages.delete(clientMessageId);
-    try { await this.session.cancel(clientMessageId); }
-    catch (error) { this.update({ error: describeError(error) }); }
+    await this.session.cancel(clientMessageId);
   }
 
   /** Take a waiting message back to edit it: its text and images, removed from the queue. */
@@ -599,8 +599,7 @@ export class SessionStore {
   }
 
   async queue(action: "continue" | "discard" | "retry"): Promise<void> {
-    try { await this.session.queue(action); }
-    catch (error) { this.update({ error: describeError(error) }); }
+    await this.session.queue(action);
   }
 
   async compactSession(): Promise<void> {
@@ -656,7 +655,7 @@ export class SessionStore {
   }
 
   private fail(error: unknown): void {
-    this.update({ connected: false, error: describeError(error) });
+    this.update({ connected: false, connectionError: describeError(error) });
   }
 
   private update(patch: Partial<ChatSnapshot>): void {
@@ -716,6 +715,8 @@ export class SessionStore {
   private applySummary(data: Data): void {
     const prompts = promptsOf(data.pendingApprovals, data.pendingQuestions);
     const failed = record(data.failedTurn);
+    const failedError = record(failed?.error);
+    const failure = record(data.failure);
     // The session's model, its list and levels are the runtime's, as the host relays them.
     const selected = record(data.model);
     const modelState = selected ? modelStateOf(selected.state) : this.state.modelState;
@@ -732,7 +733,8 @@ export class SessionStore {
       ...(text(data.thinkingLevel) ? { thinkingLevel: text(data.thinkingLevel) } : {}),
       ...(record(data.firstOutput) ? { firstOutput: firstOutputOf(record(data.firstOutput)!) } : {}),
       ...("queue" in data ? { queue: queueOf(data.queue) } : {}),
-      ...("failedTurn" in data ? { failedTurn: failed && text(failed.clientMessageId) ? { clientMessageId: text(failed.clientMessageId)!, text: text(failed.text) ?? "" } : null } : {}),
+      ...("failedTurn" in data ? { failedTurn: failed && text(failed.clientMessageId) ? { clientMessageId: text(failed.clientMessageId)!, text: text(failed.text) ?? "", ...(failedError ? { error: { code: text(failedError.code) ?? "", text: text(failedError.text) ?? "" } } : {}) } : null } : {}),
+      ...("failure" in data ? { failure: failure ? { code: text(failure.code) ?? "", text: text(failure.text) ?? "" } : null } : {}),
       ...(prompts ? { prompts } : {}),
       ...("widgets" in data ? { widgets: widgetsOf(data.widgets) } : {}),
       ...("statuses" in data ? { statuses: statusesOf(data.statuses) } : {}),
@@ -741,8 +743,13 @@ export class SessionStore {
     this.applyPreferredModel();
   }
 
-  private applyNotice(message: string, level: unknown, command?: CommandRef): void {
+  private applyNotice(message: string, level: unknown, command?: CommandRef, extension = false): void {
     if (!message.trim()) return;
+    // An extension's failure is the runtime's word to the person, shown as it is.
+    if (extension) {
+      this.update({ notice: { id: ++this.noticeSeq, text: message, level: "error", source: "extension" } });
+      return;
+    }
     const notice = classifyNotice(message, level);
     if (command && releasesFlow(command.text)) {
       this.flowReplies.set(command.id, notice);
@@ -936,14 +943,10 @@ export class SessionStore {
         break;
       }
       case "session.notice":
-        this.applyNotice(text(data.message) ?? "", data.level, commandOf(data.command));
+        this.applyNotice(text(data.message) ?? "", data.level, commandOf(data.command), data.source === "extension");
         break;
       case "session.command_done":
         this.settleCommand(commandOf(data));
-        break;
-      case "error":
-        // Turn state is not touched here: the host's summary says whether the turn ended.
-        this.update({ error: text(data.message) ?? "The model runtime reported an error." });
         break;
       default:
         break;

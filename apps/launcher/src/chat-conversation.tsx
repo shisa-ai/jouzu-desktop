@@ -6,6 +6,8 @@ import { HostAttachmentImage, MessageImage } from "./message-image";
 import { WorkspaceContext } from "./workspace-context";
 import { turnAt, type ChatMessage, type ChatProjection } from "./chat-projection";
 import type { OutboxItem } from "./chat-types";
+import { codeText, useChatText } from "./chat-text";
+import { DetailsPopover, type ControlResult } from "./control-result";
 import { ToolRenderer } from "./tool-renderers";
 import { ActivityStrip, isRichTool, type ActivityItem } from "./tool-renderers/tool-chip";
 import { TurnFooter } from "./turn-footer";
@@ -41,11 +43,11 @@ function turnUsageAt(messages: ChatMessage[], end: number) {
   }
   return { usage, startedAt: messages[start]?.timestamp };
 }
-function FinalTurnFooter({ messages, index, message, complete, onFork, forkDisabled = false }: { messages: ChatMessage[]; index: number; message: ChatMessage; complete: boolean; onFork?: (prompt: string, turn: number) => void; forkDisabled?: boolean }) {
+function FinalTurnFooter({ messages, index, message, complete, onFork, forkDisabled = false, forkResult }: { messages: ChatMessage[]; index: number; message: ChatMessage; complete: boolean; onFork?: (prompt: string, turn: number) => void; forkDisabled?: boolean; forkResult?: { turn: number; result: ControlResult } | null }) {
   const metrics = turnUsageAt(messages, index);
   // A branch names the user turn, which stays right whatever part of the history is loaded (#20).
   const turn = turnAt(messages, index, complete);
-  return <TurnFooter message={message} usage={metrics.usage} startedAt={metrics.startedAt} onFork={onFork && turn !== undefined ? () => onFork(turnPrompt(messages, index), turn) : undefined} forkDisabled={forkDisabled} />;
+  return <TurnFooter message={message} usage={metrics.usage} startedAt={metrics.startedAt} onFork={onFork && turn !== undefined ? () => onFork(turnPrompt(messages, index), turn) : undefined} forkDisabled={forkDisabled} forkResult={forkResult && forkResult.turn === turn ? forkResult.result : undefined} />;
 }
 
 /**
@@ -113,23 +115,33 @@ function UserContent({ message }: { message: ChatMessage }) {
 }
 
 /**
- * A message the host has not confirmed: shown at once, marked "not sent" on
- * failure. Why, and Retry/Discard, are with the other notices above the composer.
+ * A message the host has not confirmed: shown at once, and marked "not sent" on
+ * failure with why, Retry and Discard on the message itself. Its text is never lost.
  */
-function OutboxRow({ item }: { item: OutboxItem }) {
+function OutboxRow({ item, onRetry, onDiscard }: { item: OutboxItem; onRetry?: (clientMessageId: string) => void; onDiscard?: (clientMessageId: string) => void }) {
+  const t = useChatText();
   const failed = item.state === "failed";
+  const reason = item.code ? codeText(t, item.code) : undefined;
   return <article aria-label="user message" data-outbox={item.state} className={`ml-6 rounded-xl border px-4 py-2 text-left ${failed ? "border-destructive/40 bg-destructive/5" : "border-border bg-muted/50 opacity-70"}`}>
     <div className="mb-2 text-xs font-medium text-muted-foreground">You</div>
     {item.text && <ChatMarkdown text={item.text} />}
     {item.images.map((image, index) => <MessageImage key={index} kind="block" source={`data:${image.mimeType};base64,${image.data}`} alt="Conversation attachment" />)}
-    <p className={`mt-1 text-[11px] ${failed ? "text-destructive" : "text-muted-foreground"}`}>{failed ? "Not sent" : "Sending…"}</p>
+    {failed
+      ? <div data-send-failed className="mt-1 flex flex-wrap items-center gap-1 text-[11px] text-destructive">
+        <span className="min-w-0 flex-1">{t.notSent}{reason ? ` · ${reason}` : ""}</span>
+        {item.error && <DetailsPopover details={item.error} />}
+        {onRetry && <Button type="button" variant="outline" className="h-6 px-2 text-[10px]" onClick={() => onRetry(item.clientMessageId)}>{t.retry}</Button>}
+        {onDiscard && <Button type="button" variant="outline" className="h-6 px-2 text-[10px]" onClick={() => onDiscard(item.clientMessageId)}>{t.discard}</Button>}
+      </div>
+      : <p className="mt-1 text-[11px] text-muted-foreground">{t.sending}</p>}
   </article>;
 }
 
 /** The session's history beyond what is loaded: earlier pages read on request (#20). */
 export interface EarlierHistory { more: boolean; loading: boolean; load: () => void }
 
-function ChatConversationView({ projection, reasoningLive = false, workspace, busy = false, pendingUser = "", outbox = [], onFork, history, onOpenArtifacts, changedFiles = [] }: { projection: ChatProjection; reasoningLive?: boolean; workspace?: string; busy?: boolean; pendingUser?: string; outbox?: readonly OutboxItem[]; onFork?: (prompt: string, turn: number) => void; history?: EarlierHistory; onOpenArtifacts?: () => void; changedFiles?: readonly string[] }) {
+function ChatConversationView({ projection, reasoningLive = false, workspace, busy = false, pendingUser = "", outbox = [], onRetrySend, onDiscardSend, onFork, forkResult, history, onOpenArtifacts, changedFiles = [] }: { projection: ChatProjection; reasoningLive?: boolean; workspace?: string; busy?: boolean; pendingUser?: string; outbox?: readonly OutboxItem[]; onRetrySend?: (clientMessageId: string) => void; onDiscardSend?: (clientMessageId: string) => void; onFork?: (prompt: string, turn: number) => void; forkResult?: { turn: number; result: ControlResult } | null; history?: EarlierHistory; onOpenArtifacts?: () => void; changedFiles?: readonly string[] }) {
+  const t = useChatText();
   const scroll = useRef<HTMLDivElement>(null);
   const content = useRef<HTMLDivElement>(null);
   const following = useRef(true);
@@ -227,14 +239,13 @@ function ChatConversationView({ projection, reasoningLive = false, workspace, bu
     if (last) {
       const nextMessage = projection.messages[last.index + 1];
       const turnEnd = !nextMessage || nextMessage.role === "user";
-      // A marker only: what went wrong is explained above the composer (for the
-      // latest reply); the model's own words stay behind Details.
+      // The reply's own failure, on the reply: the model's words stay behind it.
       // Stop is the user's own choice, not an error; the status line says "Interrupted".
-      if (last.message.errorMessage && last.message.stopReason !== "aborted") rows.push(<details key={`error-${key(last.index)}`} className="text-xs text-destructive"><summary className="cursor-pointer select-none">This reply stopped with an error</summary><pre className="mt-1 select-text whitespace-pre-wrap break-words font-mono text-[10px] text-muted-foreground">{last.message.errorMessage}</pre></details>);
+      if (last.message.errorMessage && last.message.stopReason !== "aborted") rows.push(<details key={`error-${key(last.index)}`} data-reply-failed className="text-xs text-destructive"><summary className="cursor-pointer select-none">{t.replyFailed}</summary><pre className="mt-1 select-text whitespace-pre-wrap break-words font-mono text-[10px] text-muted-foreground">{last.message.errorMessage}</pre></details>);
       if (turnEnd && !projection.running && !busy && !last.message.content.some(block => block.type === "toolCall") && last.message.stopReason !== "toolUse") {
         // The workspace diff belongs to the latest turn only (#79); earlier turns list
         // what their own tool calls show.
-        rows.push(<div key={`footer-${key(last.index)}`}><TurnSummary data={summarizeTurn(projection.messages, projection.tools, last.index, nextMessage ? [] : changedFiles)} workspace={workspace} onOpenArtifacts={onOpenArtifacts} /><FinalTurnFooter messages={projection.messages} index={last.index} message={last.message} complete={complete} onFork={onFork} forkDisabled={busy} /></div>);
+        rows.push(<div key={`footer-${key(last.index)}`}><TurnSummary data={summarizeTurn(projection.messages, projection.tools, last.index, nextMessage ? [] : changedFiles)} workspace={workspace} onOpenArtifacts={onOpenArtifacts} /><FinalTurnFooter messages={projection.messages} index={last.index} message={last.message} complete={complete} onFork={onFork} forkDisabled={busy} forkResult={forkResult} /></div>);
       }
     }
   }
@@ -246,7 +257,7 @@ function ChatConversationView({ projection, reasoningLive = false, workspace, bu
         ? <div className="mx-auto mb-4 flex max-w-3xl justify-center"><Button variant="outline" className="h-7 px-3 text-xs" onClick={() => setLimit(value => value + 50)}>Show {visible.length - shown.length} earlier message{visible.length - shown.length === 1 ? "" : "s"}</Button></div>
         : history?.more && <div className="mx-auto mb-4 flex max-w-3xl justify-center"><Button variant="outline" className="h-7 px-3 text-xs" disabled={history.loading} onClick={() => { setLimit(value => Math.max(value, visible.length) + 50); history.load(); }}>{history.loading ? "Loading earlier messages…" : "Load earlier messages"}</Button></div>}
       <div ref={content} className="mx-auto max-w-3xl space-y-3">{rows}
-        {outbox.map(item => <OutboxRow key={item.clientMessageId} item={item} />)}
+        {outbox.map(item => <OutboxRow key={item.clientMessageId} item={item} onRetry={onRetrySend} onDiscard={onDiscardSend} />)}
         {pendingUser && <article aria-label="user message" className="ml-6 rounded-xl border border-border bg-muted/50 px-4 py-2 text-left opacity-70">
           <div className="mb-2 text-xs font-medium text-muted-foreground">You</div>
           <ChatMarkdown text={pendingUser} />

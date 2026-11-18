@@ -2,13 +2,13 @@ import source from "./chat-workspace.tsx?raw";
 import appSource from "./App.tsx?raw";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { SessionAlerts, SteerQueue } from "./session-alerts-view";
+import { NoticeRow, SteerQueue } from "./session-alerts-view";
 
 const noop = () => {};
 
-describe("session notices", () => {
+describe("a notice in a panel", () => {
   it("shows one sentence with its actions and keeps the raw text behind Details", () => {
-    const html = renderToStaticMarkup(<SessionAlerts alerts={[{ id: "runtime", level: "error", text: "Something in this session failed.", details: "TypeError: boom", actions: [{ label: "Retry", run: noop }], dismiss: noop }]} />);
+    const html = renderToStaticMarkup(<NoticeRow alert={{ id: "runtime", level: "error", text: "Something in this session failed.", details: "TypeError: boom", actions: [{ label: "Retry", run: noop }], dismiss: noop }} />);
     expect(html).toContain("Something in this session failed.");
     expect(html).toContain("Details");
     expect(html).toContain("Retry");
@@ -17,9 +17,6 @@ describe("session notices", () => {
     expect(html).not.toContain("TypeError: boom");
   });
 
-  it("renders nothing when there is nothing to say", () => {
-    expect(renderToStaticMarkup(<SessionAlerts alerts={[]} />)).toBe("");
-  });
 });
 
 describe("steer queue", () => {
