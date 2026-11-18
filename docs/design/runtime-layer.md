@@ -61,6 +61,7 @@ None of these is fixed in the desktop.
 | G5: a supported configuration interface (sign-in, keys, providers, catalogs, default model, language) | To file |
 | G6: structured provider error codes (same as the row above) | To file |
 | G7: input correlation: the client's id on user-message echoes; `held` distinct from `handled`; a typed reason when input is refused as busy | To file |
+| G8: notices as structure: MCP status (needs sign-in, failed) and extension failures as typed state, not `notify` text that advises terminal commands | To file |
 
 ## Constraints on the runtime integration
 

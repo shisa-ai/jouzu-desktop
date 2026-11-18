@@ -112,13 +112,14 @@ Each error is written to the slot that matches what it interrupted.
 | What failed | Slot | Clears |
 |---|---|---|
 | A tool call | `tool.result` with `ok: false` and reason | Never; history |
-| A message not delivered | `queue[].error` | Sent or discarded |
-| A reply (run) | `lastRun.error` and the reply's record | Next run starts |
+| A message not delivered | The send's response code (the client marks that message) | Sent or discarded |
+| A message the runtime refused, or that lost its runtime | `failedTurn {clientMessageId, text, error {code, text}}` | The next message, or Retry |
+| A reply (run) | The reply's record (`stopReason: error`, the provider's text) | Never; history |
 | A command in a session (stop, compact, export, model change) | The command's response code; `lastAction` where needed | Next command of that kind |
 | The session ended | `failure`, `lifecycle = failed`, entered only through `Session::fail` | Recovery succeeds |
 | A settings operation | `AppView.config.lastResult[kind]` | Next operation of that kind |
 | App startup | `AppView.startup` | Cause gone |
-| Extension / MCP status | The feature's own state, deduplicated per session | Resolved |
+| Extension / MCP status | The feature's own state, deduplicated per session. Until the runtime gives it structure, an extension failure is a runtime notice (`session.notice` with `source: extension`) | Resolved |
 
 A dropped connection between a client and the host is not a host error and is
 not recorded; the client handles reconnecting.
@@ -172,9 +173,9 @@ succeed, the response says so. Examples:
 | `model` | `provider`, `id`, `name`, `state` (`resolving` / `ready` / `none`) |
 | `models[]` | The runtime's `get_available_models`, unchanged |
 | `thinkingLevel`, `thinkingLevels[]` | The runtime's current value and allowed values |
-| `lastRun.error` | Failure of the last reply |
+| `failedTurn` | The last message that got no reply, with the runtime's reason when it refused it |
 | `lastAction` | Result of the last in-session command |
-| `failure` | Why the session ended, and the available recovery (`restart` / `remove-images` / `clear-flow`) |
+| `failure` | Why the session ended: `code`, the runtime's original `text`, and the recovery (`restart`). `remove-images` and `clear-flow` wait for the runtime to report those states (runtime G6, jouzu#54) |
 | `flow`, `textguard` | Their own state |
 
 The session list entry carries what the host holds for a session even while it
@@ -220,9 +221,9 @@ host, then the UI, then verified on the packaged build before the next.
 
 ## 10. Known gaps in the current build (1.1.3-rc.2)
 
-- Every kind of failure goes into one per-session notice list; operation failures
-  (Stop, model change) and runtime information (MCP status) land there too, so
-  one failure can be reported more than once.
+- Fixed by step 8: failures are no longer one per-session list. What remains:
+  refused images, a full Flow history and quota are recognized only from the
+  runtime's text (G6); MCP and Flow notices are text (`notify`), not structure.
 - The configuration channel allows one operation at a time and refuses the rest
   with `409 control-busy`.
 - Send is accepted before a new session has a model.

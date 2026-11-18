@@ -127,9 +127,10 @@ build before the next.
 
 ## 12. Known gaps in the current build (1.1.3-rc.2)
 
-- Errors from every source are collected into one list above the composer: they
-  stack, one failure can appear twice, and operation failures (Stop, model change)
-  look like session errors.
+- Fixed by step 9: errors no longer collect above the composer. Until the
+  runtime reports them as structure (G6), a refused image, a full Flow history
+  or exhausted quota is recognized from the runtime's text, and only adds its
+  recovery action to the reply or message that failed.
 - Send is available before a new session has a model, so a message can vanish.
 - A dropped event stream is shown as a session error.
 - One settings action running makes the others fail with "Another configuration
