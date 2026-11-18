@@ -212,6 +212,13 @@ async fn main() -> ExitCode {
         events,
         web: std::sync::Arc::new(jouzu_host::web_access::WebAccess::load(&home)),
     };
+    // A configuration change reaches new sessions through a fresh warm runtime.
+    // Live sessions keep what they started with until the runtime can reload (G2).
+    {
+        let sessions = sessions.clone();
+        state.control.on_change(move || jouzu_host::recycle_warm_runtime(&sessions));
+    }
+    state.control.start();
     // Web access listeners follow the saved scope; addresses can change (DHCP,
     // Tailscale reconnect), so re-check them periodically.
     jouzu_host::reconcile_web_access(&state).await;

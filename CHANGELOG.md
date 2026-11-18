@@ -2,6 +2,12 @@
 
 ## 1.1.3-rc.3 - unreleased
 
+- Settings actions run one after another instead of failing with "Another configuration
+  operation is running": the host queues every configuration change (keys, sign-in, catalog
+  refresh, default model, language, profile, environment variables) and each card waits only for
+  its own actions and shows its own failure. Environment variables are saved in the same queue, so a
+  model refresh after saving a key uses the new key (#63). Configuration changes reach new
+  sessions; open sessions are no longer restarted behind the person's back.
 - The stable release exam now enforces the host's part of a first reply (message accepted to
   the model request, from host.log; median 200 ms, slowest 400 ms) instead of only showing
   it in the report (#129).

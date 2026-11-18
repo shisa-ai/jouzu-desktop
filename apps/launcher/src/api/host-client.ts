@@ -156,19 +156,21 @@ export class HostClient {
     return this.request<ApiCapabilities>("/v1/capabilities");
   }
 
-  /** Control requests reach the host that owns control.mjs. */
-  control(request: Record<string, unknown>): Promise<unknown> {
-    return this.request<unknown>("/v1/control", {
+  /** The app-wide snapshot: configuration operations and the current settings. */
+  appView(): Promise<unknown> {
+    return this.request<unknown>("/v1/app");
+  }
+
+  /** Queue one configuration operation; the outcome arrives in the snapshot. */
+  configEnqueue(kind: string, body: Record<string, unknown> = {}): Promise<{ operationId: string; position: number }> {
+    return this.request<{ operationId: string; position: number }>(`/v1/config/${encodeURIComponent(kind)}`, {
       method: "POST",
-      body: JSON.stringify(request),
+      body: JSON.stringify(body),
     });
   }
 
-  controlCancel(requestId?: string): Promise<void> {
-    return this.request<unknown>("/v1/control/cancel", {
-      method: "POST",
-      body: JSON.stringify(requestId ? { requestId } : {}),
-    }).then(() => undefined);
+  configCancel(operationId: string): Promise<void> {
+    return this.request<unknown>(`/v1/config/operations/${encodeURIComponent(operationId)}/cancel`, { method: "POST" }).then(() => undefined);
   }
 
   /** Follow the one global session/control stream. */
@@ -280,13 +282,6 @@ export class HostClient {
   revokeWebDevice(id?: string): Promise<WebAccessState> {
     const path = id ? `/v1/web-access/devices/${encodeURIComponent(id)}` : "/v1/web-access/devices";
     return this.request<WebAccessState>(path, { method: "DELETE" });
-  }
-
-  saveEnvironment(entries: EnvironmentEntry[]): Promise<EnvironmentEntry[]> {
-    return this.request<{ entries: EnvironmentEntry[] }>("/v1/environment", {
-      method: "PUT",
-      body: JSON.stringify(entries),
-    }).then(body => body.entries);
   }
 
   async sessions(): Promise<SessionSummary[]> {

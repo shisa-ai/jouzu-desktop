@@ -9,7 +9,7 @@ pub struct Entry {
     pub enabled: bool,
 }
 
-fn validate(entries: &[Entry]) -> Result<(), String> {
+pub(crate) fn validate(entries: &[Entry]) -> Result<(), String> {
     let mut names = std::collections::HashSet::new();
     for entry in entries {
         if entry.name.is_empty()

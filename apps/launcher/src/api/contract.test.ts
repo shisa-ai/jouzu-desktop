@@ -80,7 +80,6 @@ function client() {
     deleteArtifact: vi.fn(async () => undefined),
     files: vi.fn(async () => [{ name: "a.txt", path: "C:/work/a.txt", isDir: false, size: 1 }]),
     environment: vi.fn(async () => [{ name: "A", value: "1", enabled: true }]),
-    saveEnvironment: vi.fn(async (entries: EnvironmentEntry[]) => entries),
     subscribe: vi.fn(() => () => undefined),
   };
   return { value: value as unknown as HostClient, raw: value, calls };
@@ -100,7 +99,7 @@ function bridge() {
     readFile: vi.fn(async () => ({ name: 'a.png', mimeType: 'image/png', data: 'AA==' })),
   };
   const settings: SettingsApi = {
-    environment: { read: vi.fn(async () => [] as EnvironmentEntry[]), save: vi.fn(async () => undefined) },
+    environment: { read: vi.fn(async () => [] as EnvironmentEntry[]) },
     webAccess: {
       read: vi.fn(async () => { throw new Error('unused'); }),
       update: vi.fn(async () => { throw new Error('unused'); }),

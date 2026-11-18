@@ -27,7 +27,8 @@ async function open(page: any, language: () => unknown, requests: any[]) {
     };
   });
   await page.goto(UI_BASE);
-  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  // A display language saved on the Jouzu side may already be in use.
+  await page.getByRole('button', { name: /^(Settings|設定)$/ }).click();
   const dialog = page.getByRole('dialog');
   await dialog.getByRole('tab', { name: /^(Language|言語)$/ }).click();
   return dialog;

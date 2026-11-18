@@ -165,7 +165,7 @@ describe("HostClient", () => {
   });
   test("a global stream the host closes is reported, so the window reconnects", async () => {
     const fetchImpl = (async () => new Response(
-      new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode("id: 7\nevent: control.device\ndata: {\"seq\":7}\n\n")); controller.close(); } }),
+      new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode("id: 7\nevent: app.updated\ndata: {\"seq\":7}\n\n")); controller.close(); } }),
       { status: 200, headers: { "content-type": "text/event-stream" } },
     )) as typeof fetch;
     const client = new HostClient({ baseUrl: "http://host", fetchImpl });

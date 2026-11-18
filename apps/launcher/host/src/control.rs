@@ -1,131 +1,289 @@
-//! Jouzu configuration executed by the host.
+//! Configuration operations, owned by the host.
 //!
-//! One operation at a time, a shared update lock, both pipes read concurrently, the
-//! child in its own job object, device codes from stderr as events, and a cancel or a
-//! 190 second deadline that terminates the tree. The shell no longer runs this code.
+//! Every operation that reads or changes configuration (sign-in, keys, providers,
+//! catalogs, default model, language, profile, saved environment variables) goes
+//! through one queue here and runs serially. A request is validated per kind,
+//! gets an operation id and its position at once, and never waits for the
+//! operation itself. The result, what is running, what is queued and the current
+//! settings are one snapshot, `AppView`, published as `app.updated` on every change.
+//!
+//! The values live in the runtime's own configuration files. They are read and
+//! written through the control program (`control.mjs`) until the runtime offers a
+//! supported configuration interface (runtime G5). The control program runs in its
+//! own process per operation, inside a job that is terminated on cancel or after
+//! a 190 second deadline.
 
 mod adapter;
 mod app;
 
 use std::{
-    collections::VecDeque,
+    collections::{BTreeMap, VecDeque},
     path::Path,
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc, Mutex,
-    },
-    time::{Duration, Instant},
+    sync::{Arc, Mutex, OnceLock},
+    time::Duration,
 };
 
-use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
-    sync::{broadcast, Notify},
+    sync::Notify,
 };
 
 use crate::session::ApiError;
 
 pub const TIMEOUT: Duration = Duration::from_secs(190);
-const REPLAY: usize = 100;
 const STDOUT_LIMIT: usize = 8 * 1024 * 1024;
+/// Operations waiting at once. A client that floods the queue is refused, not
+/// served late.
+const QUEUE_LIMIT: usize = 64;
 
-/// The actions the contract exposes to the UI.
-const ACTIONS: &[&str] = &[
-    "status",
-    "refresh-catalogs",
-    "catalog-accept",
-    "catalog-reject",
-    "profile",
-    "import",
-    "custom-provider",
-    "provider-key",
-    "provider-remove",
-    "default-model",
-    "shisa-login",
-    "shisa-logout",
-    "provider-oauth",
-    "language",
+/// The shape of one request field.
+#[derive(Clone, Copy)]
+enum Field {
+    /// A required string of at most this many bytes, not empty.
+    Text(usize),
+    /// An optional string of at most this many bytes.
+    OptionalText(usize),
+    Flag,
+    OptionalFlag,
+    OptionalInteger,
+    /// An object of at most 8 string values of at most 32 bytes each.
+    OptionalStrings,
+}
+
+/// One kind of operation: the fields it accepts and whether it changes anything.
+struct Kind {
+    name: &'static str,
+    fields: &'static [(&'static str, Field)],
+    /// Reads only: no runtime has to be replaced after it.
+    reads: bool,
+}
+
+const KINDS: &[Kind] = &[
+    Kind { name: "status", fields: &[], reads: true },
+    Kind { name: "profile", fields: &[("profile", Field::Text(16))], reads: false },
+    Kind { name: "import", fields: &[("accept", Field::Flag)], reads: false },
+    Kind { name: "shisa-login", fields: &[], reads: false },
+    Kind { name: "shisa-logout", fields: &[], reads: false },
+    Kind { name: "refresh-catalogs", fields: &[], reads: false },
+    Kind {
+        name: "catalog-accept",
+        fields: &[("revision", Field::Text(256)), ("digest", Field::Text(256)), ("sourceId", Field::OptionalText(256))],
+        reads: false,
+    },
+    Kind {
+        name: "catalog-reject",
+        fields: &[("revision", Field::Text(256)), ("digest", Field::Text(256)), ("sourceId", Field::OptionalText(256))],
+        reads: false,
+    },
+    Kind { name: "provider-oauth", fields: &[("provider", Field::Text(64))], reads: false },
+    Kind { name: "provider-key", fields: &[("provider", Field::Text(64)), ("token", Field::Text(8192))], reads: false },
+    Kind { name: "provider-remove", fields: &[("provider", Field::Text(64))], reads: false },
+    Kind {
+        name: "custom-provider",
+        fields: &[
+            ("provider", Field::Text(64)),
+            ("url", Field::Text(2048)),
+            ("model", Field::Text(256)),
+            ("edit", Field::OptionalFlag),
+            ("imageInput", Field::OptionalFlag),
+            ("contextWindow", Field::OptionalInteger),
+            ("maxTokens", Field::OptionalInteger),
+        ],
+        reads: false,
+    },
+    Kind { name: "default-model", fields: &[("provider", Field::Text(64)), ("model", Field::Text(256))], reads: false },
+    Kind {
+        name: "language",
+        fields: &[
+            ("uiLocale", Field::OptionalText(32)),
+            ("responseLanguage", Field::OptionalText(32)),
+            ("artifactPolicy", Field::OptionalStrings),
+        ],
+        reads: false,
+    },
+    // Saved environment variables: written by the host itself (`environment.rs`),
+    // queued like the rest so a refresh queued after a save sees the new values.
+    Kind { name: "environment", fields: &[], reads: false },
 ];
 
-#[derive(Debug, Clone, Serialize)]
-pub struct ControlEvent {
-    pub seq: u64,
-    pub event: String,
-    pub data: Value,
+const ENVIRONMENT_ENTRIES: usize = 256;
+
+fn invalid(message: impl Into<String>) -> ApiError {
+    ApiError::new(axum::http::StatusCode::BAD_REQUEST, "config-invalid", message, false)
 }
 
-/// The event ring and its subscribers. Cloned into the pipe readers so a device line
-/// can be published without borrowing the manager.
-struct EventBus {
-    seq: AtomicU64,
-    sender: broadcast::Sender<ControlEvent>,
-    history: Mutex<VecDeque<ControlEvent>>,
-    hub: Option<Arc<crate::events::EventHub>>,
+/// What one validated request carries to its operation.
+#[derive(Clone)]
+enum Payload {
+    /// Forwarded to the control program: `action` plus the kind's own fields only.
+    Adapter(Value),
+    Environment(Vec<crate::environment::Entry>),
 }
 
-impl EventBus {
-    fn new(hub: Option<Arc<crate::events::EventHub>>) -> Self {
-        let (sender, _) = broadcast::channel(256);
-        Self {
-            seq: AtomicU64::new(0),
-            sender,
-            history: Mutex::new(VecDeque::with_capacity(REPLAY)),
-            hub,
-        }
+/// Check a request body against its kind. Unknown kinds, unknown fields, wrong
+/// types and over-long values are refused here and never reach the control program.
+fn validate(kind: &str, body: &Value) -> Result<(&'static Kind, Payload), ApiError> {
+    let Some(spec) = KINDS.iter().find(|spec| spec.name == kind) else {
+        return Err(ApiError::new(
+            axum::http::StatusCode::NOT_FOUND,
+            "config-unknown-kind",
+            format!("Unknown configuration operation `{kind}`"),
+            false,
+        ));
+    };
+    let empty = Map::new();
+    let object = match body {
+        Value::Null => &empty,
+        Value::Object(object) => object,
+        _ => return Err(invalid("The request body must be a JSON object")),
+    };
+    if spec.name == "environment" {
+        return validate_environment(object).map(|entries| (spec, Payload::Environment(entries)));
     }
-
-    fn publish(&self, event: &str, data: Value) {
-        let seq = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
-        let frame = ControlEvent {
-            seq,
-            event: event.to_string(),
-            data,
-        };
-        {
-            let mut history = self
-                .history
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if history.len() == REPLAY {
-                history.pop_front();
+    if let Some(unknown) = object.keys().find(|key| !spec.fields.iter().any(|(name, _)| name == key)) {
+        return Err(invalid(format!("Unknown field `{unknown}` for `{kind}`")));
+    }
+    let mut payload = Map::new();
+    payload.insert("action".into(), Value::String(spec.name.into()));
+    for (name, field) in spec.fields {
+        let value = object.get(*name).filter(|value| !value.is_null());
+        let fine = match (field, value) {
+            (Field::Text(limit), Some(Value::String(text))) => !text.is_empty() && text.len() <= *limit,
+            (Field::Text(_), _) => false,
+            (Field::OptionalText(_), None) => true,
+            (Field::OptionalText(limit), Some(Value::String(text))) => text.len() <= *limit,
+            (Field::Flag, Some(Value::Bool(_))) => true,
+            (Field::OptionalFlag, None | Some(Value::Bool(_))) => true,
+            (Field::OptionalInteger, None) => true,
+            (Field::OptionalInteger, Some(Value::Number(number))) => number.as_i64().is_some(),
+            (Field::OptionalStrings, None) => true,
+            (Field::OptionalStrings, Some(Value::Object(map))) => {
+                map.len() <= 8
+                    && map.iter().all(|(key, value)| {
+                        key.len() <= 32 && value.as_str().is_some_and(|text| text.len() <= 32)
+                    })
             }
-            history.push_back(frame.clone());
+            _ => false,
+        };
+        if !fine {
+            return Err(invalid(format!("Invalid or missing field `{name}` for `{kind}`")));
         }
-        if let Some(hub) = &self.hub {
-            hub.publish_control(&frame.event, frame.data.clone());
+        if let Some(value) = value {
+            payload.insert((*name).into(), value.clone());
         }
-        let _ = self.sender.send(frame);
     }
+    if spec.name == "language" && payload.len() == 1 {
+        return Err(invalid("`language` needs at least one setting"));
+    }
+    Ok((spec, Payload::Adapter(Value::Object(payload))))
 }
 
-struct Inflight {
-    request_id: String,
+fn validate_environment(object: &Map<String, Value>) -> Result<Vec<crate::environment::Entry>, ApiError> {
+    if let Some(unknown) = object.keys().find(|key| key.as_str() != "entries") {
+        return Err(invalid(format!("Unknown field `{unknown}` for `environment`")));
+    }
+    let Some(Value::Array(rows)) = object.get("entries") else {
+        return Err(invalid("Invalid or missing field `entries` for `environment`"));
+    };
+    if rows.len() > ENVIRONMENT_ENTRIES {
+        return Err(invalid("Too many environment variables"));
+    }
+    let mut entries = Vec::with_capacity(rows.len());
+    for row in rows {
+        let Some(row) = row.as_object() else {
+            return Err(invalid("Each environment entry must be an object"));
+        };
+        if let Some(unknown) = row.keys().find(|key| !["name", "value", "enabled"].contains(&key.as_str())) {
+            return Err(invalid(format!("Unknown field `{unknown}` in an environment entry")));
+        }
+        let (Some(Value::String(name)), Some(Value::String(value)), Some(Value::Bool(enabled))) =
+            (row.get("name"), row.get("value"), row.get("enabled"))
+        else {
+            return Err(invalid("An environment entry needs `name`, `value` and `enabled`"));
+        };
+        entries.push(crate::environment::Entry { name: name.clone(), value: value.clone(), enabled: *enabled });
+    }
+    crate::environment::validate(&entries).map_err(invalid)?;
+    Ok(entries)
+}
+
+struct Operation {
+    id: String,
+    kind: &'static Kind,
+    payload: Payload,
+    queued_at: String,
+}
+
+struct Running {
+    id: String,
+    kind: &'static str,
+    started_at: String,
+    /// A sign-in waiting for the person: the page and code the control program reported.
+    device: Option<adapter::DeviceCode>,
     cancel: Arc<Notify>,
 }
 
-/// Releases the single control slot and cancels the running operation when the request
-/// future is dropped, for example because the page navigated away.
-struct InflightGuard<'a> {
-    slot: &'a Mutex<Option<Inflight>>,
+/// How an operation ended.
+struct Outcome {
+    ok: bool,
+    code: Option<&'static str>,
+    text: Option<String>,
 }
 
-impl Drop for InflightGuard<'_> {
-    fn drop(&mut self) {
-        let mut slot = self
-            .slot
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(active) = slot.take() {
-            active.cancel.notify_one();
-        }
+impl Outcome {
+    fn ok() -> Self {
+        Self { ok: true, code: None, text: None }
     }
+
+    fn render(&self, operation_id: &str, params: Value) -> Value {
+        json!({
+            "operationId": operation_id,
+            "ok": self.ok,
+            "code": self.code,
+            "params": params,
+            "text": self.text,
+            "finishedAt": now(),
+        })
+    }
+}
+
+/// What a finished operation leaves behind.
+struct Done {
+    /// Configuration changed: new runtimes must start with it.
+    changed: bool,
+    settings: Option<Value>,
+    params: Value,
+    outcome: Outcome,
+    /// The settings could not be read after an operation that itself succeeded.
+    read_failure: Option<Outcome>,
+}
+
+impl Done {
+    fn failed(outcome: Outcome) -> Self {
+        Self { changed: false, settings: None, params: json!({}), outcome, read_failure: None }
+    }
+}
+
+#[derive(Default)]
+struct Queue {
+    running: Option<Running>,
+    queued: VecDeque<Operation>,
+    last: BTreeMap<&'static str, Value>,
+    /// The control program's last full answer; `None` until one was read.
+    settings: Option<Value>,
+    /// Raised on every change, so a client keeps only the newest snapshot.
+    revision: u64,
+    draining: bool,
 }
 
 pub struct ControlManager {
     context: adapter::ControlContext,
-    inflight: Mutex<Option<Inflight>>,
-    bus: Arc<EventBus>,
+    queue: Mutex<Queue>,
+    hub: Option<Arc<crate::events::EventHub>>,
+    /// Runs after an operation that changed configuration (the host recycles its
+    /// warm runtime, so a new session starts with the new configuration).
+    after_change: OnceLock<Box<dyn Fn() + Send + Sync>>,
 }
 
 impl ControlManager {
@@ -145,197 +303,282 @@ impl ControlManager {
                 root: managed.to_path_buf(),
                 app,
                 home: runtime_home.to_path_buf(),
+                script: adapter::SCRIPT.to_string(),
             },
-            inflight: Mutex::new(None),
-            bus: Arc::new(EventBus::new(events)),
+            queue: Mutex::new(Queue::default()),
+            hub: events,
+            after_change: OnceLock::new(),
         })
+    }
+
+    /// Tests: run this script in place of the control program.
+    #[cfg(test)]
+    pub(crate) fn with_script(mut self, script: &str) -> Self {
+        self.context.script = script.to_string();
+        self
+    }
+
+    /// Set once by the host when it starts.
+    pub fn on_change(&self, action: impl Fn() + Send + Sync + 'static) {
+        let _ = self.after_change.set(Box::new(action));
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Queue> {
+        self.queue.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// How the adapter is started for one request. The variables saved in
     /// Settings are read here, from the file Settings writes, for every request:
     /// a key saved a moment ago must reach the next refresh without a restart.
-    pub fn launch_spec(&self) -> Result<adapter::LaunchSpec, ApiError> {
+    pub fn launch_spec(&self) -> Result<adapter::LaunchSpec, String> {
         let environment = crate::environment::enabled(&self.context.home).map_err(|message| {
-            ApiError::internal(format!(
-                "Saved environment variables could not be read: {message}. Open Settings > Environment and save them again."
-            ))
+            format!("Saved environment variables could not be read: {message}. Open Settings > Environment and save them again.")
         })?;
-        adapter::spec(&self.context, &environment).map_err(|message| {
-            ApiError::internal(format!("Configuration is unavailable: {message}"))
+        adapter::spec(&self.context, &environment)
+            .map_err(|message| format!("Configuration is unavailable: {message}"))
+    }
+
+    /// The configuration part of `AppView`: what runs, what waits, the last result
+    /// of each kind, and the current settings.
+    pub fn view(&self) -> Value {
+        Self::render(&self.lock())
+    }
+
+    fn render(queue: &Queue) -> Value {
+        let running = queue.running.as_ref().map(|running| {
+            let mut value = json!({
+                "operationId": running.id,
+                "kind": running.kind,
+                "startedAt": running.started_at,
+            });
+            if let Some(device) = &running.device {
+                value["device"] = json!({ "url": device.url, "code": device.code });
+                if let Some(provider) = &device.provider {
+                    value["device"]["provider"] = Value::String(provider.clone());
+                }
+            }
+            value
+        });
+        let ahead = usize::from(queue.running.is_some());
+        let queued: Vec<Value> = queue
+            .queued
+            .iter()
+            .enumerate()
+            .map(|(index, operation)| {
+                json!({
+                    "operationId": operation.id,
+                    "kind": operation.kind.name,
+                    "position": index + ahead,
+                    "queuedAt": operation.queued_at,
+                })
+            })
+            .collect();
+        json!({
+            "revision": queue.revision,
+            "config": { "running": running, "queued": queued, "lastResult": queue.last },
+            "settings": queue.settings,
         })
     }
 
-    pub fn subscribe(&self) -> broadcast::Receiver<ControlEvent> {
-        self.bus.sender.subscribe()
-    }
-
-    /// Every event after `after`, for SSE resume.
-    pub fn events_after(&self, after: u64) -> (Vec<ControlEvent>, u64) {
-        let history = self
-            .bus
-            .history
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let events: Vec<ControlEvent> = history
-            .iter()
-            .filter(|event| event.seq > after)
-            .cloned()
-            .collect();
-        let last = events.last().map(|event| event.seq).unwrap_or(after);
-        (events, last)
-    }
-
-    /// Cancel the active operation, or the one with this id. An idle manager is a no-op.
-    pub fn cancel(&self, request_id: Option<&str>) -> bool {
-        let inflight = self
-            .inflight
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let Some(active) = inflight.as_ref() else {
-            return false;
-        };
-        if let Some(requested) = request_id {
-            if requested != active.request_id {
-                return false;
-            }
+    fn publish(&self, queue: &mut Queue) {
+        queue.revision += 1;
+        if let Some(hub) = &self.hub {
+            hub.publish_control("app.updated", Self::render(queue));
         }
-        active.cancel.notify_one();
-        true
     }
 
-    pub async fn request(&self, body: Value) -> Result<Value, ApiError> {
-        let action = body
-            .get("action")
-            .and_then(Value::as_str)
-            .unwrap_or("status")
-            .to_string();
-        if !ACTIONS.contains(&action.as_str()) {
-            return Err(ApiError::bad_request("Unsupported configuration operation"));
-        }
-        let request_id = body
-            .get("requestId")
-            .and_then(Value::as_str)
-            .filter(|value| !value.is_empty() && value.len() <= 64)
-            .map(ToString::to_string)
-            .unwrap_or_else(new_request_id);
-
-        let cancel = Arc::new(Notify::new());
-        {
-            let mut inflight = self
-                .inflight
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if inflight.is_some() {
+    /// Queue one operation. Answers at once with its id and position (how many
+    /// operations run before it); the outcome arrives in `AppView.config.lastResult`.
+    pub fn enqueue(self: &Arc<Self>, kind: &str, body: &Value) -> Result<Value, ApiError> {
+        let (kind, payload) = validate(kind, body)?;
+        let id = format!("op-{:016x}", rand::random::<u64>());
+        let (position, start) = {
+            let mut queue = self.lock();
+            if queue.queued.len() >= QUEUE_LIMIT {
                 return Err(ApiError::new(
-                    axum::http::StatusCode::CONFLICT,
-                    "control-busy",
-                    "Another configuration operation is running",
+                    axum::http::StatusCode::TOO_MANY_REQUESTS,
+                    "config-queue-full",
+                    "Too many configuration operations are waiting",
                     true,
                 ));
             }
-            *inflight = Some(Inflight {
-                request_id: request_id.clone(),
-                cancel: cancel.clone(),
-            });
+            queue.queued.push_back(Operation { id: id.clone(), kind, payload, queued_at: now() });
+            // How many operations run before this one.
+            let position = queue.queued.len() - 1 + usize::from(queue.running.is_some());
+            let start = !queue.draining;
+            queue.draining = true;
+            self.publish(&mut queue);
+            (position, start)
+        };
+        if start {
+            let manager = self.clone();
+            tokio::spawn(async move { manager.drain().await });
         }
-        // The slot is released on drop, including when the HTTP client goes away and
-        // axum drops this future: a disconnected request must not wedge control forever.
-        let _slot = InflightGuard { slot: &self.inflight };
-        let started = Instant::now();
-        self.bus.publish(
-            "control.started",
-            json!({ "requestId": request_id, "action": action, "startedAt": now() }),
-        );
+        Ok(json!({ "operationId": id, "position": position }))
+    }
 
-        let result = self
-            .run(&request_id, &action, body, cancel, started)
-            .await;
+    /// Read the settings once when the host starts.
+    pub fn start(self: &Arc<Self>) {
+        let _ = self.enqueue("status", &Value::Null);
+    }
 
-        match result {
-            Ok(value) => {
-                self.bus.publish(
-                    "control.finished",
-                    json!({
-                        "requestId": request_id,
-                        "action": action,
-                        "ok": true,
-                        "durationMs": started.elapsed().as_millis() as u64,
-                    }),
-                );
-                Ok(value)
+    /// Cancel a queued or running operation. `false` when no such operation waits
+    /// or runs (it may have finished just now).
+    pub fn cancel(&self, id: &str) -> bool {
+        let mut queue = self.lock();
+        if let Some(running) = queue.running.as_ref().filter(|running| running.id == id) {
+            running.cancel.notify_one();
+            return true;
+        }
+        let Some(index) = queue.queued.iter().position(|operation| operation.id == id) else {
+            return false;
+        };
+        let operation = queue.queued.remove(index).expect("index is in range");
+        let result = Outcome { ok: false, code: Some("config-cancelled"), text: None }.render(&operation.id, json!({}));
+        queue.last.insert(operation.kind.name, result);
+        self.publish(&mut queue);
+        true
+    }
+
+    async fn drain(self: Arc<Self>) {
+        loop {
+            let (operation, cancel) = {
+                let mut queue = self.lock();
+                let Some(operation) = queue.queued.pop_front() else {
+                    queue.draining = false;
+                    return;
+                };
+                let cancel = Arc::new(Notify::new());
+                queue.running = Some(Running {
+                    id: operation.id.clone(),
+                    kind: operation.kind.name,
+                    started_at: now(),
+                    device: None,
+                    cancel: cancel.clone(),
+                });
+                self.publish(&mut queue);
+                (operation, cancel)
+            };
+            let id = operation.id.clone();
+            let kind = operation.kind;
+            // Each operation runs in a task of its own: a panic in it ends that
+            // operation with a result, never the queue.
+            let manager = self.clone();
+            let done = match tokio::spawn(async move { manager.execute(&operation, cancel).await }).await {
+                Ok(done) => done,
+                Err(_) => Done::failed(Outcome {
+                    ok: false,
+                    code: Some("config-failed"),
+                    text: Some("The configuration operation stopped unexpectedly".into()),
+                }),
+            };
+            // A new runtime must see the change before anyone reads the result.
+            if done.changed {
+                if let Some(action) = self.after_change.get() {
+                    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(action)).is_err() {
+                        eprintln!("configuration: replacing the warm runtime failed");
+                    }
+                }
             }
-            Err(error) => {
-                self.bus.publish(
-                    "control.error",
-                    json!({
-                        "requestId": request_id,
-                        "action": action,
-                        "code": error.code,
-                        "message": error.message,
-                        "retryable": error.retryable,
-                    }),
-                );
-                Err(error)
+            let mut queue = self.lock();
+            queue.running = None;
+            if let Some(settings) = done.settings {
+                queue.settings = Some(settings);
             }
+            if let Some(read) = done.read_failure {
+                queue.last.insert("status", read.render(&id, json!({})));
+            }
+            queue.last.insert(kind.name, done.outcome.render(&id, done.params));
+            self.publish(&mut queue);
         }
     }
 
-    async fn run(
-        &self,
-        request_id: &str,
-        action: &str,
-        body: Value,
-        cancel: Arc<Notify>,
-        _started: Instant,
-    ) -> Result<Value, ApiError> {
-        let spec = self.launch_spec()?;
+    /// Run one operation.
+    async fn execute(self: &Arc<Self>, operation: &Operation, cancel: Arc<Notify>) -> Done {
+        match &operation.payload {
+            Payload::Environment(entries) => {
+                if let Err(message) = crate::environment::save(&self.context.home, entries) {
+                    return Done::failed(Outcome { ok: false, code: Some("config-failed"), text: Some(message) });
+                }
+                // Saved: that is this operation's result. The settings as the
+                // control program now sees them are a read of their own; if it
+                // fails, it is reported as the read's failure, not the save's.
+                let read = self.run(&operation.id, &json!({ "action": "status" }), cancel).await;
+                let (settings, read_failure) = match read {
+                    Ok(answer) => (Some(split_answer(answer).0), None),
+                    Err(outcome) => (None, Some(outcome)),
+                };
+                Done { changed: true, settings, params: json!({}), outcome: Outcome::ok(), read_failure }
+            }
+            Payload::Adapter(payload) => match self.run(&operation.id, payload, cancel).await {
+                Ok(answer) => {
+                    let (settings, params) = split_answer(answer);
+                    Done {
+                        changed: !operation.kind.reads,
+                        settings: Some(settings),
+                        params,
+                        outcome: Outcome::ok(),
+                        read_failure: None,
+                    }
+                }
+                Err(outcome) => Done::failed(outcome),
+            },
+        }
+    }
+
+    async fn run(self: &Arc<Self>, operation_id: &str, payload: &Value, cancel: Arc<Notify>) -> Result<Value, Outcome> {
+        let unavailable = |text: String| Outcome { ok: false, code: Some("config-unavailable"), text: Some(text) };
+        let spec = self.launch_spec().map_err(unavailable)?;
         let mut command = tokio::process::Command::new(&spec.program);
         command
             .args(&spec.args)
             .envs(spec.env.iter().map(|(key, value)| (key, value)))
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
         #[cfg(windows)]
         {
             command.creation_flags(0x08000000);
         }
         let mut child = command
             .spawn()
-            .map_err(|_| ApiError::internal("Cannot start the configuration service"))?;
-        let job = child.id().and_then(Job::adopt).ok_or_else(|| {
-            ApiError::internal("Cannot own the configuration process")
-        })?;
-
-        if let Some(mut stdin) = child.stdin.take() {
-            let payload = serde_json::to_vec(&request_payload(&body, action))
-                .map_err(|_| ApiError::bad_request("Invalid configuration request"))?;
-            let _ = stdin.write_all(&payload).await;
-            let _ = stdin.shutdown().await;
-            drop(stdin);
+            .map_err(|_| unavailable("Cannot start the configuration service".into()))?;
+        // The child's tree belongs to a job on Windows; elsewhere the child itself
+        // is killed (`kill_on_drop`, `start_kill`).
+        let job = crate::runtime::job::Job::new()
+            .map_err(|_| unavailable("Cannot own the configuration process".into()))?;
+        #[cfg(windows)]
+        {
+            let handle = child
+                .raw_handle()
+                .ok_or_else(|| unavailable("Cannot own the configuration process".into()))?;
+            job.assign(handle)
+                .map_err(|_| unavailable("Cannot own the configuration process".into()))?;
         }
 
-        let mut stderr_task = None;
-        if let Some(stderr) = child.stderr.take() {
-            let bus = self.bus.clone();
-            let request_id = request_id.to_string();
-            stderr_task = Some(tokio::spawn(async move {
+        // Written beside the wait below, so a child that never reads its input
+        // still meets the deadline and Cancel.
+        let stdin_task = child.stdin.take().map(|mut stdin| {
+            let bytes = serde_json::to_vec(payload).unwrap_or_default();
+            tokio::spawn(async move {
+                let _ = stdin.write_all(&bytes).await;
+                let _ = stdin.shutdown().await;
+            })
+        });
+
+        let stderr_task = child.stderr.take().map(|stderr| {
+            let id = operation_id.to_string();
+            let manager = self.clone();
+            tokio::spawn(async move {
                 let mut lines = BufReader::new(stderr).lines();
                 while let Ok(Some(line)) = lines.next_line().await {
                     if let Some(device) = adapter::parse_event(&line) {
-                        let mut data = json!({
-                            "requestId": request_id,
-                            "url": device.url,
-                            "code": device.code,
-                        });
-                        if let Some(provider) = device.provider {
-                            data["provider"] = Value::String(provider);
-                        }
-                        bus.publish("control.device", data);
+                        manager.show_device(&id, device);
                     }
                 }
-            }));
-        }
+            })
+        });
         let stdout_task = child.stdout.take().map(|mut stream| {
             tokio::spawn(async move {
                 let mut buffer = Vec::new();
@@ -355,8 +598,6 @@ impl ControlManager {
             })
         });
 
-        let deadline = tokio::time::sleep(TIMEOUT);
-        tokio::pin!(deadline);
         enum Stop {
             Exited(std::io::Result<std::process::ExitStatus>),
             Cancelled,
@@ -365,227 +606,88 @@ impl ControlManager {
         let stop = tokio::select! {
             status = child.wait() => Stop::Exited(status),
             _ = cancel.notified() => Stop::Cancelled,
-            _ = &mut deadline => Stop::TimedOut,
+            _ = tokio::time::sleep(TIMEOUT) => Stop::TimedOut,
         };
 
-        match stop {
-            Stop::Exited(status) => {
-                drop(job);
-                if let Some(task) = stderr_task.take() {
-                    let _ = task.await;
-                }
-                let stdout = match stdout_task {
-                    Some(task) => task.await.unwrap_or_default(),
-                    None => Vec::new(),
-                };
-                let status = status
-                    .map_err(|_| ApiError::internal("Cannot check the configuration service"))?;
-                let value: Value = serde_json::from_slice(&stdout).map_err(|_| {
-                    ApiError::internal("Invalid configuration service response")
-                })?;
-                if !status.success() {
-                    let message = value
-                        .get("error")
-                        .and_then(Value::as_str)
-                        .unwrap_or("Configuration operation failed")
-                        .to_string();
-                    return Err(ApiError::new(
-                        axum::http::StatusCode::BAD_REQUEST,
-                        "control-failed",
-                        message,
-                        true,
-                    ));
-                }
-                Ok(value)
-            }
+        let status = match stop {
+            Stop::Exited(status) => status,
             Stop::Cancelled | Stop::TimedOut => {
                 // The adapter has no cancel channel of its own, so stopping means the
                 // whole job goes. That is the documented loss in ADR 0012.
                 job.terminate();
                 let _ = child.start_kill();
                 let _ = child.wait().await;
-                drop(job);
-                if let Some(task) = stderr_task.take() {
+                if let Some(task) = stderr_task {
                     task.abort();
+                    let _ = task.await;
                 }
                 if let Some(task) = stdout_task {
                     task.abort();
                 }
-                let (code, message) = if matches!(stop, Stop::Cancelled) {
-                    (
-                        "control-cancelled",
-                        "Configuration operation cancelled; refresh the status before retrying",
-                    )
+                if let Some(task) = stdin_task {
+                    task.abort();
+                }
+                return Err(if matches!(stop, Stop::Cancelled) {
+                    Outcome { ok: false, code: Some("config-cancelled"), text: None }
                 } else {
-                    (
-                        "control-timeout",
-                        "Configuration operation timed out; refresh the status before retrying",
-                    )
-                };
-                Err(ApiError::new(
-                    axum::http::StatusCode::REQUEST_TIMEOUT,
-                    code,
-                    message,
-                    true,
-                ))
+                    Outcome {
+                        ok: false,
+                        code: Some("config-timeout"),
+                        text: Some("The configuration operation timed out".into()),
+                    }
+                });
             }
+        };
+        drop(job);
+        if let Some(task) = stdin_task {
+            task.abort();
         }
+        if let Some(task) = stderr_task {
+            let _ = task.await;
+        }
+        let stdout = match stdout_task {
+            Some(task) => task.await.unwrap_or_default(),
+            None => Vec::new(),
+        };
+        let failed = |text: &str| Outcome { ok: false, code: Some("config-failed"), text: Some(text.into()) };
+        let status = status.map_err(|_| failed("Cannot check the configuration service"))?;
+        let value: Value =
+            serde_json::from_slice(&stdout).map_err(|_| failed("Invalid configuration service response"))?;
+        if !status.success() {
+            let text = value
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("Configuration operation failed");
+            return Err(failed(text));
+        }
+        Ok(value)
+    }
+
+    fn show_device(&self, operation_id: &str, device: adapter::DeviceCode) {
+        let mut queue = self.lock();
+        let Some(running) = queue.running.as_mut().filter(|running| running.id == operation_id) else {
+            return;
+        };
+        running.device = Some(device);
+        self.publish(&mut queue);
     }
 }
 
-fn request_payload(body: &Value, action: &str) -> Value {
-    let mut payload = body.clone();
-    if let Some(object) = payload.as_object_mut() {
-        object.insert("action".to_string(), Value::String(action.to_string()));
-        object.remove("requestId");
-    }
-    payload
-}
-
-fn new_request_id() -> String {
-    format!("c-{:016x}", rand::random::<u64>())
+/// Split the control program's answer: the settings, and what belongs to the
+/// operation that produced it (a catalog refresh's or decision's outcome, with
+/// a held revision), which goes with that operation's result.
+fn split_answer(mut answer: Value) -> (Value, Value) {
+    let catalog = answer.as_object_mut().and_then(|object| object.remove("catalog"));
+    let params = match catalog {
+        Some(catalog) => json!({ "catalog": catalog }),
+        None => json!({}),
+    };
+    (answer, params)
 }
 
 fn now() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
-/// A job object that owns the control child. `Drop` closes the job, which terminates
-/// whatever remains because the limit is KILL_ON_JOB_CLOSE.
-struct Job {
-    handle: isize,
-}
-
-impl Job {
-    #[cfg(windows)]
-    fn adopt(pid: u32) -> Option<Job> {
-        use windows::Win32::{
-            Foundation::CloseHandle,
-            System::{
-                JobObjects::{
-                    AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
-                    SetInformationJobObject, TerminateJobObject,
-                    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-                },
-                Threading::{OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE},
-            },
-        };
-        unsafe {
-            let job = CreateJobObjectW(None, windows::core::PCWSTR::null()).ok()?;
-            let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
-            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-            SetInformationJobObject(
-                job,
-                JobObjectExtendedLimitInformation,
-                (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
-                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
-            )
-            .ok()?;
-            let process = OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, false, pid).ok()?;
-            let assigned = AssignProcessToJobObject(job, process).is_ok();
-            let _ = CloseHandle(process);
-            if !assigned {
-                let _ = CloseHandle(job);
-                return None;
-            }
-            let _ = TerminateJobObject;
-            Some(Job {
-                handle: job.0 as isize,
-            })
-        }
-    }
-
-    #[cfg(not(windows))]
-    fn adopt(_pid: u32) -> Option<Job> {
-        None
-    }
-
-    #[cfg(windows)]
-    fn terminate(&self) {
-        use windows::Win32::{Foundation::HANDLE, System::JobObjects::TerminateJobObject};
-        unsafe {
-            let _ = TerminateJobObject(HANDLE(self.handle as *mut _), 1);
-        }
-    }
-
-    #[cfg(not(windows))]
-    fn terminate(&self) {}
-}
-
-impl Drop for Job {
-    fn drop(&mut self) {
-        #[cfg(windows)]
-        unsafe {
-            let _ = windows::Win32::Foundation::CloseHandle(windows::Win32::Foundation::HANDLE(
-                self.handle as *mut _,
-            ));
-        }
-    }
-}
-
-
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A manager whose runtime home is `<root>/data`, as the shell starts the host.
-    fn manager(root: &Path) -> ControlManager {
-        let node = root.join("node.exe");
-        std::fs::write(&node, "").unwrap();
-        let data = root.join("data");
-        std::fs::create_dir_all(&data).unwrap();
-        ControlManager::new(root, root, Some(node), &data, None).expect("control manager")
-    }
-
-    /// Issue #72: every operation the configuration service implements must be
-    /// one the host lets through, or the UI's request is refused before it runs.
-    #[test]
-    fn every_operation_the_service_handles_is_allowed() {
-        let mut handled = Vec::new();
-        for quote in ['\'', '"'] {
-            let marker = format!("action === {quote}");
-            let mut rest = adapter::SCRIPT;
-            while let Some(index) = rest.find(&marker) {
-                rest = &rest[index + marker.len()..];
-                if let Some(end) = rest.find(quote) {
-                    handled.push(rest[..end].to_string());
-                }
-            }
-        }
-        assert!(handled.iter().any(|action| action == "language"), "{handled:?}");
-        for action in &handled {
-            assert!(ACTIONS.contains(&action.as_str()), "the host refuses `{action}`, which control.mjs handles");
-        }
-    }
-
-    fn value(spec: &adapter::LaunchSpec, name: &str) -> Option<String> {
-        spec.env.iter().find(|(key, _)| key == name).map(|(_, value)| value.clone())
-    }
-
-    #[test]
-    fn an_unreadable_saved_file_fails_the_request_with_a_reason() {
-        let root = tempfile::tempdir().unwrap();
-        let control = manager(root.path());
-        std::fs::write(root.path().join("data").join("launcher-environment.bin"), b"broken").unwrap();
-        let error = control.launch_spec().unwrap_err();
-        assert!(format!("{error:?}").contains("Saved environment variables could not be read"), "{error:?}");
-    }
-
-    /// Issue #63: the configuration service reads the file Settings writes
-    /// (`<runtime home>/launcher-environment.bin`) at each request, so a key saved
-    /// after the host started reaches the next model refresh.
-    #[cfg(windows)]
-    #[test]
-    fn a_key_saved_after_start_reaches_the_next_request() {
-        let root = tempfile::tempdir().unwrap();
-        let control = manager(root.path());
-        assert_eq!(value(&control.launch_spec().unwrap(), "SHISA_API_KEY"), None);
-        let data = root.path().join("data");
-        let entry = |value: &str| crate::environment::Entry { name: "SHISA_API_KEY".into(), value: value.into(), enabled: true };
-        crate::environment::save(&data, &[entry("first")]).unwrap();
-        assert_eq!(value(&control.launch_spec().unwrap(), "SHISA_API_KEY").as_deref(), Some("first"));
-        crate::environment::save(&data, &[entry("second")]).unwrap();
-        assert_eq!(value(&control.launch_spec().unwrap(), "SHISA_API_KEY").as_deref(), Some("second"));
-    }
-}
+mod tests;

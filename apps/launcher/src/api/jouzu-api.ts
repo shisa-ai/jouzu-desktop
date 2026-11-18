@@ -344,8 +344,8 @@ export interface WebAccessPairing {
 
 export interface SettingsApi {
   environment: {
+    /** Saving goes through the configuration queue (`environment`). */
     read(): Promise<EnvironmentEntry[]>;
-    save(entries: EnvironmentEntry[]): Promise<void>;
   };
   /** Only the desktop window may manage web access; web clients get `forbidden`. */
   webAccess: {

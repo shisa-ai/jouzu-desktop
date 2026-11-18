@@ -240,10 +240,7 @@ pub fn router(state: AppState) -> Router {
         .route("/status", get(host_status))
         .route("/timing", axum::routing::post(record_ui_timing))
         .route("/runtime/warm", get(warm_runtime).post(aim_warm_runtime))
-        .route(
-            "/environment",
-            get(read_environment).put(save_environment),
-        )
+        .route("/environment", get(read_environment))
         .route("/capabilities", get(capabilities))
         .route("/web-access", get(web_access_snapshot).put(update_web_access))
         .route(
@@ -252,9 +249,9 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/web-access/devices", axum::routing::delete(revoke_all_web_devices))
         .route("/web-access/devices/{id}", axum::routing::delete(revoke_web_device))
-        .route("/control", axum::routing::post(control_request))
-        .route("/control/cancel", axum::routing::post(control_cancel))
-        .route("/control/events", get(control_events))
+        .route("/app", get(app_view))
+        .route("/config/{kind}", axum::routing::post(config_enqueue))
+        .route("/config/operations/{id}/cancel", axum::routing::post(config_cancel))
         .route("/events", get(global_events))
         .route("/models", get(models))
         .route("/tools", get(tools_snapshot).put(update_tools))
@@ -1020,93 +1017,50 @@ fn sse_event(event: session::SessionEvent) -> SseEvent {
         .data(serde_json::to_string(&event.data).unwrap_or_else(|_| "{}".to_string()))
 }
 
-async fn control_request(
-    State(state): State<AppState>,
-    Json(body): Json<Value>,
-) -> Result<Json<Value>, ApiError> {
-    let reads_only = matches!(
-        body.get("action").and_then(Value::as_str),
-        Some("status")
-    );
-    let result = state.control.request(body).await;
-    // Sign-ins, providers, profiles and catalogs change what a runtime loads at
-    // start; an unused warm runtime would still have the old ones.
-    if !reads_only && result.is_ok() {
-        recycle_warm_runtime(&state);
-    }
-    result.map(Json)
+/// The app-wide snapshot: configuration operations and the current settings.
+async fn app_view(State(state): State<AppState>) -> Json<Value> {
+    Json(state.control.view())
 }
 
-fn recycle_warm_runtime(state: &AppState) {
-    if let Some(pool) = state.sessions.warm_runtime() {
+/// Queue one configuration operation. The body is checked against its kind;
+/// the answer is the operation's id and position, never its outcome.
+async fn config_enqueue(
+    State(state): State<AppState>,
+    AxumPath(kind): AxumPath<String>,
+    body: axum::body::Bytes,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    // Read here, so a body that is not JSON gets the same typed refusal as a
+    // wrong field, whatever its content type.
+    let body: Value = if body.iter().all(u8::is_ascii_whitespace) {
+        Value::Null
+    } else {
+        serde_json::from_slice(&body).map_err(|_| {
+            ApiError::new(StatusCode::BAD_REQUEST, "config-invalid", "The request body is not JSON", false)
+        })?
+    };
+    state
+        .control
+        .enqueue(&kind, &body)
+        .map(|accepted| (StatusCode::ACCEPTED, Json(accepted)))
+}
+
+async fn config_cancel(State(state): State<AppState>, AxumPath(id): AxumPath<String>) -> Result<StatusCode, ApiError> {
+    if state.control.cancel(&id) {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiError::new(
+            StatusCode::NOT_FOUND,
+            "config-operation-unknown",
+            "No such configuration operation is waiting or running",
+            false,
+        ))
+    }
+}
+
+pub fn recycle_warm_runtime(sessions: &SessionManager) {
+    if let Some(pool) = sessions.warm_runtime() {
         pool.recycle();
     }
-}
-
-#[derive(Deserialize)]
-struct ControlCancelRequest {
-    #[serde(rename = "requestId")]
-    request_id: Option<String>,
-}
-
-async fn control_cancel(
-    State(state): State<AppState>,
-    body: Option<Json<ControlCancelRequest>>,
-) -> StatusCode {
-    let requested = body.and_then(|Json(body)| body.request_id);
-    state.control.cancel(requested.as_deref());
-    StatusCode::NO_CONTENT
-}
-
-/// Control progress and cancel results. Same envelope as session events so one client
-/// reader can consume both.
-async fn control_events(
-    State(state): State<AppState>,
-    Query(query): Query<EventsQuery>,
-    headers: HeaderMap,
-) -> Response {
-    let after = headers
-        .get("last-event-id")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<u64>().ok())
-        .or(query.after)
-        .unwrap_or(0);
-    let mut receiver = state.control.subscribe();
-    let (initial, mut last) = state.control.events_after(after);
-    let control = state.control.clone();
-    let stream = async_stream::stream! {
-        for event in initial {
-            last = event.seq;
-            yield Ok::<_, Infallible>(control_sse_event(event));
-        }
-        loop {
-            match receiver.recv().await {
-                Ok(event) if event.seq > last => {
-                    last = event.seq;
-                    yield Ok::<_, Infallible>(control_sse_event(event));
-                }
-                Ok(_) => {}
-                Err(broadcast::error::RecvError::Lagged(_)) => {
-                    let (missed, _) = control.events_after(last);
-                    for event in missed {
-                        last = event.seq;
-                        yield Ok::<_, Infallible>(control_sse_event(event));
-                    }
-                }
-                Err(broadcast::error::RecvError::Closed) => break,
-            }
-        }
-    };
-    Sse::new(stream)
-        .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
-        .into_response()
-}
-
-fn control_sse_event(event: control::ControlEvent) -> SseEvent {
-    SseEvent::default()
-        .id(event.seq.to_string())
-        .event(event.event)
-        .data(serde_json::to_string(&event.data).unwrap_or_else(|_| "{}".to_string()))
 }
 
 /// One stream for every session and control event. The UI no longer opens a
@@ -1156,6 +1110,9 @@ async fn global_events(
         .map(ToString::to_string);
     let latest = state.events.latest_seq();
     let summaries = state.sessions.summaries();
+    // The app snapshot too: an update published before this stream opened is
+    // not lost to a client that read `/v1/app` a moment earlier.
+    let app_view = state.control.view();
     let sessions = state.sessions.clone();
     let mut receiver = state.events.subscribe();
     let events = state.events.clone();
@@ -1170,6 +1127,11 @@ async fn global_events(
                 }
                 yield Ok::<_, Infallible>(sse_data("session.updated", latest, summary));
             }
+            let mut app_view = app_view;
+            if let Some(object) = app_view.as_object_mut() {
+                object.insert("seq".to_string(), json!(latest));
+            }
+            yield Ok::<_, Infallible>(sse_data("app.updated", latest, app_view));
             last = latest;
         } else {
             let (replay, resync, latest) = events.replay_after(after);
@@ -1404,15 +1366,6 @@ async fn read_environment(
         .map_err(ApiError::bad_request)
 }
 
-async fn save_environment(
-    State(state): State<AppState>,
-    Json(entries): Json<Vec<environment::Entry>>,
-) -> Result<Json<Value>, ApiError> {
-    environment::save(state.sessions.runtime_home(), &entries).map_err(ApiError::bad_request)?;
-    recycle_warm_runtime(&state);
-    Ok(Json(json!({ "entries": entries })))
-}
-
 /// The models a running runtime registered, as it answers them: the list
 /// `set_model` accepts. The host keeps no list of its own.
 async fn models(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
@@ -1542,7 +1495,7 @@ async fn update_tools(
     }
     std::fs::write(&path, format!("{}\n", value))
         .map_err(|error| ApiError::internal(format!("Could not save tools: {error}")))?;
-    recycle_warm_runtime(&state);
+    recycle_warm_runtime(&state.sessions);
     Ok(Json(value))
 }
 
@@ -1676,7 +1629,7 @@ async fn capabilities(
         "contract": "2026-11-12",
         "hostVersion": state.version,
         "runtimeKind": crate::runtime::adapter::pi::KIND,
-        "features": ["chat", "sse", "replay", "prompts", "history-paging", "history-blocks", "models", "control", "tools", "mcp", "recovery", "deferred-sessions"],
+        "features": ["chat", "sse", "replay", "prompts", "history-paging", "history-blocks", "models", "config", "tools", "mcp", "recovery", "deferred-sessions"],
         "scopes": scopes,
         "limits": { "maxMessageBytes": 32768, "maxUploadBytes": 26214400 },
         "defaultWorkspace": default_workspace,
@@ -2573,6 +2526,63 @@ mod tests {
         let (status, _, body) = call(app, get("/v1/health", "127.0.0.1:40123")).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
         assert!(body.contains("unauthorized"));
+    }
+
+    /// The configuration routes: typed refusals, 202 with an id, the result in
+    /// the app snapshot, and cancel of an unknown operation.
+    #[tokio::test]
+    async fn configuration_requests_are_queued_and_answered_in_the_snapshot() {
+        let dir = dist();
+        let app = router(state(dir.path().to_path_buf()));
+        let post = |path: &str, body: &str| {
+            Request::builder()
+                .method("POST")
+                .uri(path)
+                .header(header::HOST, "127.0.0.1:40123")
+                .header(header::AUTHORIZATION, format!("Bearer {}", "a".repeat(64)))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap()
+        };
+        let authed_get = |path: &str| {
+            Request::builder()
+                .uri(path)
+                .header(header::HOST, "127.0.0.1:40123")
+                .header(header::AUTHORIZATION, format!("Bearer {}", "a".repeat(64)))
+                .body(Body::empty())
+                .unwrap()
+        };
+        let (status, _, body) = call(app.clone(), post("/v1/config/nope", "{}")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+        assert!(body.contains("config-unknown-kind"), "{body}");
+        let (status, _, body) = call(app.clone(), post("/v1/config/provider-key", "{\"provider\":\"a\"}")).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.contains("config-invalid"), "{body}");
+        let (status, _, body) = call(app.clone(), post("/v1/config/status", "not json")).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.contains("config-invalid"), "{body}");
+        let (status, _, body) = call(app.clone(), post("/v1/config/operations/op-none/cancel", "")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+
+        let (status, _, body) = call(app.clone(), post("/v1/config/status", "")).await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+        let accepted: Value = serde_json::from_str(&body).unwrap();
+        let id = accepted["operationId"].as_str().unwrap().to_string();
+        let mut seen = Value::Null;
+        for _ in 0..200 {
+            let (_, _, body) = call(app.clone(), authed_get("/v1/app")).await;
+            let view: Value = serde_json::from_str(&body).unwrap();
+            if view["config"]["lastResult"]["status"]["operationId"] == id.as_str() {
+                seen = view;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        // This host has no control program to run: the read fails with a reason.
+        assert_eq!(seen["config"]["lastResult"]["status"]["ok"], false, "{seen}");
+        assert_eq!(seen["config"]["lastResult"]["status"]["code"], "config-unavailable", "{seen}");
+        let (status, _, _) = call(app.clone(), post("/v1/control", "{\"action\":\"status\"}")).await;
+        assert_ne!(status, StatusCode::OK);
     }
 
     #[tokio::test]

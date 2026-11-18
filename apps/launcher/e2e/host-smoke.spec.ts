@@ -31,23 +31,20 @@ test("settings works through the real host", async ({ page }) => {
   // Control status arrives from the host on open; the Shisa.AI card proves it parsed.
   await expect(dialog.getByText("Shisa.AI", { exact: true }).first()).toBeVisible();
 
-  // The same control endpoint the UI uses. The UI may still hold the single control
-  // slot while it reads status on open, so a 409 is expected and retried, not a failure.
-  let status = { code: 0, body: "" };
+  // The same configuration queue the UI uses: a request is accepted at once, the
+  // result arrives in the app snapshot, and nothing is refused because another
+  // operation runs.
+  const accepted = await page.evaluate(async () => {
+    const response = await fetch("/v1/config/status", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+    return { code: response.status, body: await response.json() };
+  });
+  expect(accepted.code).toBe(202);
   await expect
-    .poll(async () => {
-      status = await page.evaluate(async () => {
-        const response = await fetch("/v1/control", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ action: "status" }),
-        });
-        return { code: response.status, body: await response.text() };
-      });
-      return status.code;
-    }, { timeout: 30_000 })
-    .toBe(200);
-  expect(status.body).toContain('"schemaVersion"');
+    .poll(async () => page.evaluate(async (id: string) => {
+      const view = await (await fetch("/v1/app")).json();
+      return view.config.lastResult.status?.operationId === id ? view.config.lastResult.status.ok : null;
+    }, accepted.body.operationId), { timeout: 30_000 })
+    .toBe(true);
 
   // Switching tabs keeps the dialog alive and shows host-backed environment data.
   await dialog.getByRole("tab", { name: "Environment", exact: true }).click();

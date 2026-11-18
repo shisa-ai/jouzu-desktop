@@ -34,6 +34,17 @@ fn manager(app: &PathBuf, home: &PathBuf) -> Arc<ControlManager> {
     Arc::new(ControlManager::new(install, install, node, &runtime_home, None).expect("control manager"))
 }
 
+async fn settled(manager: &ControlManager) -> serde_json::Value {
+    for _ in 0..2000 {
+        let view = manager.view();
+        if view["config"]["running"].is_null() && view["config"]["queued"].as_array().is_some_and(Vec::is_empty) {
+            return view;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("the configuration queue did not settle: {}", manager.view());
+}
+
 #[tokio::test]
 async fn status_runs_the_real_adapter() {
     let Some(app) = app_dir() else { return };
@@ -44,42 +55,30 @@ async fn status_runs_the_real_adapter() {
     };
     let manager = manager(&app, &home);
 
-    let value = manager
-        .request(json!({ "action": "status" }))
-        .await
-        .expect("status");
+    manager.enqueue("status", &json!({})).expect("queued");
+    let view = settled(&manager).await;
 
+    assert_eq!(view["config"]["lastResult"]["status"]["ok"], true, "{view}");
+    let value = &view["settings"];
     assert_eq!(value["schemaVersion"], 1, "unexpected status payload: {value}");
     // Models are each runtime's answer, not configuration status.
     assert!(value.get("models").is_none(), "status lists models: {value}");
-    assert!(
-        value["providers"].is_array(),
-        "providers is not an array: {value}"
-    );
+    assert!(value.get("modelReady").is_none(), "status guesses model readiness: {value}");
+    assert!(value["providers"].is_array(), "providers is not an array: {value}");
 }
 
 #[tokio::test]
-async fn an_unknown_action_is_refused_without_spawning() {
-    let Some(app) = app_dir() else { return };
+async fn an_unknown_kind_is_refused_without_queuing() {
     let temp = tempfile::tempdir().unwrap();
-    let manager = manager(&app, &temp.path().to_path_buf());
+    let node = temp.path().join("node.exe");
+    std::fs::write(&node, "").unwrap();
+    let data = temp.path().join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    let manager = Arc::new(ControlManager::new(temp.path(), temp.path(), Some(node), &data, None).unwrap());
 
-    let error = manager
-        .request(json!({ "action": "definitely-not-an-action" }))
-        .await
-        .expect_err("unknown action");
+    let error = manager.enqueue("definitely-not-an-action", &json!({})).expect_err("unknown kind");
 
-    assert_eq!(error.code, "invalid-request");
+    assert_eq!(error.code, "config-unknown-kind");
+    assert!(manager.view()["config"]["queued"].as_array().unwrap().is_empty());
+    assert!(!manager.cancel("op-never-started"));
 }
-
-#[tokio::test]
-async fn cancelling_idle_control_is_a_no_op() {
-    let Some(app) = app_dir() else { return };
-    let temp = tempfile::tempdir().unwrap();
-    let manager = manager(&app, &temp.path().to_path_buf());
-
-    assert!(!manager.cancel(None));
-    assert!(!manager.cancel(Some("c-never-started")));
-}
-
-

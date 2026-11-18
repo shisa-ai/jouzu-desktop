@@ -101,7 +101,10 @@ POST /approvals/{id}/decision        { clientId, decision }
 POST /questions/{id}/answer          { clientId, answers }
 GET  /models (the running runtime's own list)
 GET|PUT /tools, GET /mcp, GET|POST /workspaces
-POST /control, POST /control/cancel
+GET  /app                            configuration operations and settings (AppView; event app.updated)
+POST /config/{kind}                  queue one configuration operation -> 202 { operationId, position }
+POST /config/operations/{id}/cancel  cancel a queued or running operation
+GET  /environment                    saved variables (saved through POST /config/environment)
 ```
 
 A client that answers prompts declares the `prompts` capability when it attaches

@@ -21,7 +21,7 @@ async function openSetup(page:Page, initial:{profile?:string|null;modelReady?:bo
  const snapshot=()=>({schemaVersion:1,modelReady:s.modelReady,profile:s.profile,account:{signedIn:s.signedIn},credentials:[],customProviders:[],providers:[{id:'openai',name:'OpenAI'},{id:'openai-codex',name:'Codex',oauth:true,oauthName:'OpenAI (ChatGPT Plus/Pro)',apiKey:false}],models:[]});
  // A device sign-in shows its code and blocks until it settles or is cancelled, like the real backend.
  const deviceSignIn=(host:HostStub, device:Record<string,unknown>, done:()=>void)=>new Promise((resolve,reject)=>{
-  host.emit('control.device',device);
+  host.device(device);
   const timer=setTimeout(()=>{stop();done();resolve(snapshot());},8000);
   const stop=host.onCancel(()=>{clearTimeout(timer);stop();reject(new Error('cancelled'));});
  });

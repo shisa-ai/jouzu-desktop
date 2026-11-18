@@ -4,7 +4,7 @@ import { ApiProvider } from "./api/context";
 import { createJouzuApi } from "./api/adapters";
 import { HostClient } from "./api/host-client";
 import { configureSessionPool } from "./session-store";
-import { configureControlClient } from "./api/control-client";
+import { configureAppView } from "./app-view";
 import { configureEventRouter } from "./event-router";
 import "./styles.css";
 
@@ -34,7 +34,7 @@ const client = new HostClient({ baseUrl: endpoint.baseUrl, token: endpoint.token
 const api = createJouzuApi(client);
 configureSessionPool(api);
 configureEventRouter(client);
-configureControlClient(client);
+configureAppView(client);
 
 async function boot() {
   try { await api.start(); } catch { /* The App surfaces the host error; it never falls back. */ }

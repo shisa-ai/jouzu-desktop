@@ -164,9 +164,6 @@ function hostGroups(client: HostClient) {
   const settings: SettingsApi = {
     environment: {
       read: () => client.environment(),
-      async save(entries) {
-        await client.saveEnvironment(entries);
-      },
     },
     webAccess: {
       read: () => client.webAccess(),

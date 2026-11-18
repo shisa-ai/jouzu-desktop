@@ -21,6 +21,8 @@ pub struct ControlContext {
     /// The runtime home: `JOUZU_HOME` for the adapter, and the folder whose
     /// `launcher-environment.bin` holds the variables saved in Settings.
     pub home: PathBuf,
+    /// The program run with `--eval`: `SCRIPT`, except in tests.
+    pub script: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,7 +46,7 @@ pub struct DeviceCode {
 /// `environment` is the saved variables read for this launch; it is applied after
 /// `JOUZU_HOME`.
 pub fn spec(context: &ControlContext, environment: &[(String, String)]) -> Result<LaunchSpec, String> {
-    if SCRIPT.len() > MAX_SCRIPT_BYTES {
+    if context.script.len() > MAX_SCRIPT_BYTES {
         return Err("Control adapter is too large for the command line".into());
     }
     if !context.node.is_file() {
@@ -59,7 +61,7 @@ pub fn spec(context: &ControlContext, environment: &[(String, String)]) -> Resul
     let args = vec![
         "--input-type=module".to_string(),
         "--eval".to_string(),
-        SCRIPT.to_string(),
+        context.script.clone(),
         "--".to_string(),
         root.to_string_lossy().into_owned(),
         app.to_string_lossy().into_owned(),
@@ -147,6 +149,7 @@ mod tests {
             root: PathBuf::from(r"C:\managed"),
             app: PathBuf::from(r"C:\managed\app"),
             home: PathBuf::from(r"C:\managed\data"),
+            script: SCRIPT.to_string(),
         }
     }
 
