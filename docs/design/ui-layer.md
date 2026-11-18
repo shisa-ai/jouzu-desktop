@@ -132,9 +132,8 @@ build before the next.
   or exhausted quota is recognized from the runtime's text, and only adds its
   recovery action to the reply or message that failed.
 - Send is available before a new session has a model, so a message can vanish.
-- A dropped event stream is shown as a session error.
 - One settings action running makes the others fail with "Another configuration
   operation is running".
 - MCP status repeats on every runtime start, with terminal advice.
-- Chat text is hard-coded English; notices grow with their text and push the
-  composer.
+- Parts of the chat (labels, menus, run status words) are still English only;
+  every error and recovery text is in the four interface languages.
