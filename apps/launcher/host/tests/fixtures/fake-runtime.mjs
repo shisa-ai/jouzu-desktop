@@ -248,6 +248,9 @@ function prompt(id, text, images) {
     return;
   }
   promptLog(text);
+  // "REFUSE <text>": an input handler refuses the prompt with <text> (like Flow
+  // when its request history is full); no run starts.
+  if (String(text).startsWith("REFUSE ")) { failure(id, "prompt", String(text).slice(7)); return; }
   // "EXTERR <text>" first reports an extension failure, like a real extension would.
   if (String(text).startsWith("EXTERR ")) out({ type: "extension_error", extensionPath: "fake", event: "turn_start", error: String(text).slice(7) });
   // Like the runtime: prompt() awaits the extensions' input handlers before the

@@ -94,8 +94,6 @@ struct SessionPreference {
 use sha2::{Digest, Sha256};
 
 pub const DEFAULT_REPLAY_LIMIT: usize = 5_000;
-const MAX_TEXT_BYTES: usize = 32 * 1024;
-const RUNTIME_GAVE_UP: &str = "The runtime could not recover; restart it to continue.";
 
 #[derive(Clone)]
 pub struct RuntimeSpec {
@@ -691,6 +689,8 @@ pub struct Session {
     commands: Mutex<Vec<(String, String)>>,
     cancelled: Mutex<HashMap<String, Instant>>,
     failed_turn: Mutex<Option<Value>>,
+    /// Why the session ended, set only by `fail`: the one session-level error.
+    failure: Mutex<Option<Value>>,
     listed: Mutex<bool>,
     title: Mutex<String>,
     updated_at: Mutex<Option<String>>,
@@ -1990,33 +1990,20 @@ impl Session {
             // runtime started after it: restarting cannot help, so the session
             // fails at once with the runtime's reason.
             if reply.is_handshake() && matches!(self.status(), Status::Starting | Status::Recovering) {
-                self.fail(
-                    "session-attach-failed",
-                    &format!("This session could not be opened: {message}"),
-                    true,
-                );
+                self.fail("session-attach-failed", message, true);
                 return;
             }
-            // A refused model or level is that command's result only: its
-            // caller gets it, and the session keeps the runtime's model.
-            if !matches!(reply, pi::Reply::SetModel | pi::Reply::SetThinkingLevel) {
-                self.publish(
-                    "error",
-                    json!({ "code": "runtime-error", "message": message, "retryable": false }),
-                );
-            }
             // Only a failed handshake makes the session unusable. Any other
-            // command fails alone: its caller gets the error, and a failed
-            // prompt ends its turn.
+            // command fails alone: a command a client asked for answers that
+            // client (its request carries the runtime's text), and a refused
+            // prompt is that message's failure. Nothing is reported to the
+            // whole session.
             // A refused level leaves the runtime's own; ask which one that is.
             if reply == pi::Reply::SetThinkingLevel {
                 self.request_state();
             }
             if reply == pi::Reply::Prompt {
-                self.end_turn(
-                    response_id,
-                    json!({ "aborted": true, "reason": "runtime-error", "message": message }),
-                );
+                self.prompt_refused(response_id, message);
             }
             return;
         }
@@ -2134,6 +2121,36 @@ impl Session {
     }
 
     /// End the active turn for this message without a runtime run.
+    /// The runtime refused a prompt: that message got no reply. It becomes the
+    /// session's failed message (Retry sends it again), with the runtime's own
+    /// text; nothing else in the session changes.
+    fn prompt_refused(self: &Arc<Self>, client_message_id: &str, message: &str) {
+        let ours = self.run_guard().as_ref().is_some_and(|run| {
+            run.client_message_id.as_deref() == Some(client_message_id) && !run.phase.started()
+        });
+        if ours {
+            let text = self
+                .messages
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .get(client_message_id)
+                .map(|message| message.text.clone())
+                .unwrap_or_default();
+            *self
+                .failed_turn
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(json!({
+                "clientMessageId": client_message_id,
+                "text": text,
+                "error": { "code": "prompt-refused", "text": message },
+            }));
+        }
+        self.end_turn(
+            client_message_id,
+            json!({ "aborted": true, "reason": "prompt-refused", "message": message }),
+        );
+    }
+
     fn end_turn(self: &Arc<Self>, client_message_id: &str, outcome: Value) {
         let turn = {
             let mut run = self.run_guard();
@@ -2632,9 +2649,13 @@ impl Session {
                     log(&self.home, "warn", "extension.stale_ctx", json!({ "session": self.id, "message": message }));
                     return;
                 }
+                // An extension's handler failed; the runtime carries on (the
+                // run is not interrupted). It is the runtime telling the person
+                // something, like any other notice, not a session error.
+                log(&self.home, "warn", "extension.error", json!({ "session": self.id, "message": message }));
                 self.publish(
-                    "error",
-                    json!({ "code": "extension-error", "message": message, "retryable": false }),
+                    "session.notice",
+                    json!({ "message": message, "level": "error", "source": "extension" }),
                 );
             }
             PiRecord::Error => {
@@ -3663,8 +3684,10 @@ impl Session {
         if client_message_id.is_empty() || client_message_id.len() > 200 {
             return Err(ApiError::bad_request("clientMessageId is required"));
         }
-        if text.is_empty() || text.len() > MAX_TEXT_BYTES {
-            return Err(ApiError::bad_request("text must be 1..32 KiB"));
+        // No length limit of the host's own: what fits is the runtime's and the
+        // model's to decide (#62).
+        if text.is_empty() {
+            return Err(ApiError::bad_request("text is required"));
         }
         if attachments.len() > 4 {
             return Err(ApiError::bad_request("Attach at most 4 images"));
@@ -3914,7 +3937,7 @@ impl Session {
                 return Err(ApiError::new(
                     axum::http::StatusCode::CONFLICT,
                     "message-held",
-                    "Flow control is holding this message; run /flow to release or cancel it",
+                    "Flow control is holding this message",
                     false,
                 ));
             }
@@ -4495,6 +4518,11 @@ impl Session {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .clone(),
+            "failure": self
+                .failure
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone(),
             "listed": *self
                 .listed
                 .lock()
@@ -4572,6 +4600,7 @@ impl Session {
             commands: Mutex::new(Vec::new()),
             cancelled: Mutex::new(HashMap::new()),
             failed_turn: Mutex::new(None),
+            failure: Mutex::new(None),
             listed: Mutex::new(false),
             title: Mutex::new(String::new()),
             updated_at: Mutex::new(None),
@@ -4819,7 +4848,7 @@ impl Session {
             Decision::GiveUp => 0,
         };
         if count == 0 {
-            self.fail("runtime-crashed", RUNTIME_GAVE_UP, true);
+            self.fail("runtime-crashed", &reason, true);
             return;
         }
         log(
@@ -4865,7 +4894,7 @@ impl Session {
             json!({ "reason": reason, "attempts": count }),
         );
         if self.restarts.exhausted() {
-            self.fail("runtime-crashed", RUNTIME_GAVE_UP, true);
+            self.fail("runtime-crashed", &reason, true);
             return;
         }
         let session = self.clone();
@@ -4890,11 +4919,19 @@ impl Session {
             "session.failed",
             json!({ "session": self.id, "code": code, "message": message }),
         );
+        // The one session-level error: the reason, the runtime's own text, and
+        // the way back. Clients read it from the snapshot; it is never also an
+        // event, so it cannot be shown twice or stacked.
+        *self
+            .failure
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(json!({
+            "code": code,
+            "text": message,
+            "retryable": retryable,
+            "recovery": "restart",
+        }));
         self.set_status(Status::Error);
-        self.publish(
-            "error",
-            json!({ "code": code, "message": message, "retryable": retryable }),
-        );
         self.queue_paused.store(true, Ordering::SeqCst);
         self.steers_in_flight.store(0, Ordering::SeqCst);
         for item in self
@@ -5054,14 +5091,7 @@ impl Session {
                     "runtime.parse_error",
                     json!({ "message": message }),
                 );
-                self.publish(
-                    "error",
-                    json!({
-                        "code": "runtime-error",
-                        "message": message,
-                        "retryable": true,
-                    }),
-                );
+
             }
             RuntimeEvent::IoError(message) => {
                 if !matches!(self.status(), Status::Stopped) {

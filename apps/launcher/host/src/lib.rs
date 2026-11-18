@@ -1678,7 +1678,7 @@ async fn capabilities(
         "runtimeKind": crate::runtime::adapter::pi::KIND,
         "features": ["chat", "sse", "replay", "prompts", "history-paging", "history-blocks", "models", "control", "tools", "mcp", "recovery", "deferred-sessions"],
         "scopes": scopes,
-        "limits": { "maxMessageBytes": 32768, "maxUploadBytes": 26214400 },
+        "limits": { "maxUploadBytes": 26214400 },
         "defaultWorkspace": default_workspace,
     }))
 }
@@ -3942,9 +3942,11 @@ mod session_tests {
         assert_eq!(summary["status"], "error", "{summary}");
         assert!(summary["activeTurn"].is_null(), "a failed session keeps no turn waiting: {summary}");
         assert_eq!(session.runtime_pid(), None, "a failed session keeps no runtime");
+        // The one session-level error is the snapshot's `failure`, never also an event.
+        assert_eq!(summary["failure"]["code"], code, "{summary}");
+        assert_eq!(summary["failure"]["recovery"], "restart", "{summary}");
         let (events, _) = session.events_after(1);
-        let error = events.iter().rev().find(|event| event.event == "error").expect("an error event");
-        assert_eq!(error.data["code"], code, "{}", error.data);
+        assert!(events.iter().all(|event| event.event != "error"), "a failure is not reported twice");
         // Stop has nothing left to wait for (it used to answer "cancelling" or
         // leave "Stopping…" up forever).
         let stop = session.cancel_message("waiting").unwrap();
@@ -3962,10 +3964,9 @@ mod session_tests {
         .await;
         wait_until(|| session.status() == Status::Error).await;
         assert_failed_and_settled(&session, "session-attach-failed");
-        let (events, _) = session.events_after(1);
-        let error = events.iter().rev().find(|event| event.event == "error").unwrap();
-        let message = error.data["message"].as_str().unwrap();
-        assert!(message.contains("Flow session metadata is missing or inconsistent."), "{message}");
+        // The runtime's own words, unwrapped: the client localizes from the code.
+        let summary = session.summary();
+        assert_eq!(summary["failure"]["text"], "Flow session metadata is missing or inconsistent.", "{summary}");
         // The refusal is about the file, not the runtime: no restart may follow.
         tokio::time::sleep(Duration::from_millis(600)).await;
         let started = std::fs::read_to_string(starts.path()).unwrap().lines().count();
@@ -4503,7 +4504,7 @@ mod session_tests {
     }
 
     #[tokio::test]
-    async fn an_extension_failure_is_reported_but_a_stale_context_race_is_not() {
+    async fn an_extension_failure_is_a_notice_not_a_session_error_and_a_stale_context_race_is_neither() {
         let (manager, _home, workspace) = manager(50);
         let session = manager
             .create(workspace.path().to_str().unwrap(), None, None)
@@ -4524,7 +4525,8 @@ mod session_tests {
                     .await
                     .expect("timed out")
                     .expect("stream closed");
-                if name == "error" {
+                assert_ne!(name, "error", "an extension failure is not a session error: {data}");
+                if name == "session.notice" && data["source"] == "extension" {
                     errors.push(data);
                 } else if name == "turn.end" {
                     break;
@@ -4534,7 +4536,35 @@ mod session_tests {
         reader.abort();
         assert_eq!(errors.len(), 1, "{errors:?}");
         assert_eq!(errors[0]["message"], "flow guard crashed");
-        assert_eq!(errors[0]["code"], "extension-error");
+        assert_eq!(errors[0]["level"], "error");
+        // The run it happened in carries on and the session stays usable.
+        assert_eq!(session.status(), Status::Idle);
+        assert!(session.summary()["failure"].is_null());
+    }
+
+    #[tokio::test]
+    async fn a_refused_prompt_is_that_message_failure_only() {
+        let (manager, _home, workspace) = manager(50);
+        let session = manager
+            .create(workspace.path().to_str().unwrap(), None, None)
+            .unwrap();
+        wait_status(&session, Status::Idle).await;
+        session.send("refused-1", "REFUSE Request history is full").unwrap();
+        wait_until(|| !session.summary()["failedTurn"].is_null()).await;
+        let summary = session.summary();
+        // The message that got no reply carries the runtime's own words.
+        assert_eq!(summary["failedTurn"]["clientMessageId"], "refused-1", "{summary}");
+        assert_eq!(summary["failedTurn"]["error"]["code"], "prompt-refused", "{summary}");
+        assert_eq!(summary["failedTurn"]["error"]["text"], "Request history is full", "{summary}");
+        // Nothing else: the session is not failed and no session-wide error is published.
+        assert!(summary["failure"].is_null() && summary["activeTurn"].is_null(), "{summary}");
+        wait_status(&session, Status::Idle).await;
+        let (events, _) = session.events_after(1);
+        assert!(events.iter().all(|event| event.event != "error"), "{events:?}");
+        // The next message clears it.
+        session.send("after-1", "hello").unwrap();
+        assert!(session.summary()["failedTurn"].is_null());
+        manager.stop_all();
     }
 
     #[tokio::test]
