@@ -127,7 +127,7 @@ function OutboxRow({ item, onRetry, onDiscard }: { item: OutboxItem; onRetry?: (
     {item.text && <ChatMarkdown text={item.text} />}
     {item.images.map((image, index) => <MessageImage key={index} kind="block" source={`data:${image.mimeType};base64,${image.data}`} alt="Conversation attachment" />)}
     {failed
-      ? <div data-send-failed className="mt-1 flex flex-wrap items-center gap-1 text-[11px] text-destructive">
+      ? <div role="alert" data-send-failed className="mt-1 flex flex-wrap items-center gap-1 text-[11px] text-destructive">
         <span className="min-w-0 flex-1">{t.notSent}{reason ? ` · ${reason}` : ""}</span>
         {item.error && <DetailsPopover details={item.error} />}
         {onRetry && <Button type="button" variant="outline" className="h-6 px-2 text-[10px]" onClick={() => onRetry(item.clientMessageId)}>{t.retry}</Button>}

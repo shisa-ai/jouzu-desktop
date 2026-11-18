@@ -23,7 +23,7 @@ describe("steer queue", () => {
   it("lists waiting messages in order, each removable and editable", () => {
     const html = renderToStaticMarkup(<SteerQueue items={[{ clientMessageId: "a", text: "first", state: "queued", images: 0 }, { clientMessageId: "b", text: "second", state: "queued", images: 2 }]} onEdit={noop} onRemove={noop} onContinue={noop} onDiscard={noop} />);
     expect(html.indexOf("first")).toBeLessThan(html.indexOf("second"));
-    expect(html).toContain("2 images");
+    expect(html).toContain("2 image(s)");
     expect(html.match(/Remove queued message/g)).toHaveLength(2);
     expect(html.match(/Edit queued message/g)).toHaveLength(2);
     expect(html).not.toContain("Continue");

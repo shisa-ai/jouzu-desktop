@@ -219,6 +219,7 @@ pub enum Reply {
     SetModel,
     AvailableModels,
     AvailableThinkingLevels,
+    Abort,
     Other,
 }
 
@@ -232,6 +233,7 @@ pub fn reply_to(response: &Value) -> Reply {
         Some("set_model") => Reply::SetModel,
         Some("get_available_models") => Reply::AvailableModels,
         Some("get_available_thinking_levels") => Reply::AvailableThinkingLevels,
+        Some("abort") => Reply::Abort,
         _ => Reply::Other,
     }
 }

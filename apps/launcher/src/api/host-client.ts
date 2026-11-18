@@ -177,6 +177,7 @@ export class HostClient {
     after: number,
     onEvent: (event: ApiEvent) => void,
     onError?: (error: unknown) => void,
+    onOpen?: () => void,
   ): Unsubscribe {
     // The host registers this client's capabilities from the stream it opens;
     // without "prompts" every approval or answer from this window is refused.
@@ -191,7 +192,7 @@ export class HostClient {
         sessionId: typeof data.sessionId === "string" ? data.sessionId : undefined,
         sessionSeq: typeof data.sessionSeq === "number" ? data.sessionSeq : undefined,
       });
-    }, onError);
+    }, onError, onOpen);
   }
 
   /** Follow a server-sent event stream with the bearer token in a header. */
@@ -199,6 +200,7 @@ export class HostClient {
     path: string,
     onEvent: (id: number, event: string, data: Record<string, unknown>) => void,
     onError?: (error: unknown) => void,
+    onOpen?: () => void,
   ): Unsubscribe {
     const controller = new AbortController();
     void (async () => {
@@ -213,6 +215,7 @@ export class HostClient {
           return;
         }
         const reader = response.body?.getReader();
+        if (reader) onOpen?.();
         // A stream the host closes is a disconnect like any other: the caller
         // reconnects from its last sequence instead of going deaf.
         const ended = () => new ApiError("runtime-unavailable", "Event stream ended", true);

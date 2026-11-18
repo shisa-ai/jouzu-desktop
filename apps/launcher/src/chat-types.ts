@@ -59,6 +59,8 @@ export interface ActiveTurn {
   phase: string;
   startedAt?: number;
   step?: TurnStep;
+  /** The runtime refused the last Stop (its words); the run goes on. */
+  stopError?: string;
 }
 /** A message waiting for the running turn (steer) or, after Stop, for Continue. */
 /**
@@ -105,6 +107,8 @@ export interface ChatSnapshot {
   connectionError: string | null;
   /** The host ended the session because of an error (`failure`): the one session-level error. */
   failure?: { code: string; text: string } | null;
+  /** The runtime refused to list its models (its words); shown at the model control. */
+  modelListError?: string | null;
   /** The session is open but its transcript could not be read. */
   historyError?: string;
   /** Earlier messages exist before the loaded history (#20). */

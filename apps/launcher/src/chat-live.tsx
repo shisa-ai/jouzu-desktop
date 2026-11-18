@@ -48,7 +48,7 @@ export function turnLabel(turn: ActiveTurn | null | undefined, now: number): str
  * the message that got no reply, or else the runtime's latest notice: one line,
  * one thing at a time, never a list. Tools stay in the activity strip.
  */
-export function AgentAction({ thinking, label, running, elapsed, settled, failure, noReply, notice }: {
+export function AgentAction({ thinking, label, running, elapsed, settled, failure, noReply, hold, notice }: {
   thinking: string;
   label: string;
   running: boolean;
@@ -58,52 +58,69 @@ export function AgentAction({ thinking, label, running, elapsed, settled, failur
   failure?: { details?: string; action?: RecoveryAction };
   /** The last message got no reply: its text, the runtime's reason, and Retry. */
   noReply?: { text: string; details?: string; onRetry: () => void; action?: RecoveryAction } | null;
+  /** Flow control is holding the last message: its words behind Details, and what lets it go. */
+  hold?: { details: string; paused: boolean; busy?: boolean; onResume: () => void; onRelease: () => void; onOff: () => void } | null;
   /** The runtime's latest word to the person (a command reply, an extension failure). */
   notice?: { text: string; level: "info" | "warning" | "error"; extension?: boolean; onDismiss: () => void } | null;
 }) {
   const t = useChatText();
   const [open, setOpen] = useState(false);
   const text = thinking.trim();
+  // Every state of the line is one row of the same height, and an idle line
+  // keeps its row: a failure or notice appearing never moves the conversation.
+  const row = "flex h-8 items-center gap-2 px-1 text-[11px]";
+  const small = "h-6 shrink-0 px-2 text-[10px]";
   if (!running && !text && noReply) {
-    return <div role="alert" data-no-reply className="flex min-h-6 items-center gap-2 px-1 py-1 text-[11px] text-destructive">
+    return <div role="alert" data-no-reply className={`${row} text-destructive`}>
       <AlertTriangle className="size-3.5 shrink-0" aria-hidden="true" />
       <span className="shrink-0 font-medium">{t.noReply}</span>
       <span className="min-w-0 flex-1 truncate text-muted-foreground" title={noReply.text}>{noReply.text}</span>
       {noReply.details && <DetailsPopover details={noReply.details} />}
-      {noReply.action
-        ? <Button type="button" variant="outline" className="h-6 shrink-0 px-2 text-[10px]" disabled={noReply.action.disabled} onClick={noReply.action.run}>{noReply.action.label}</Button>
-        : <Button type="button" variant="outline" className="h-6 shrink-0 px-2 text-[10px]" onClick={noReply.onRetry}>{t.retry}</Button>}
+      {noReply.action && <Button type="button" variant="outline" className={small} disabled={noReply.action.disabled} onClick={noReply.action.run}>{noReply.action.label}</Button>}
+      <Button type="button" variant="outline" className={small} onClick={noReply.onRetry}>{t.retry}</Button>
+    </div>;
+  }
+  if (!running && !text && hold) {
+    return <div role="status" data-flow-hold className={`${row} text-amber-700 dark:text-amber-300`}>
+      <AlertTriangle className="size-3.5 shrink-0" aria-hidden="true" />
+      <span className="min-w-0 flex-1 truncate" title={t.flowHolding}>{t.flowHolding}</span>
+      <DetailsPopover details={hold.details} />
+      {hold.paused && <Button type="button" variant="outline" className={small} disabled={hold.busy} onClick={hold.onResume}>{t.resume}</Button>}
+      <Button type="button" variant="outline" className={small} disabled={hold.busy} onClick={hold.onRelease}>{t.release}</Button>
+      <Button type="button" variant="ghost" className={small} disabled={hold.busy} onClick={hold.onOff}>{t.turnOffFlow}</Button>
     </div>;
   }
   if (!running && !text && settled) {
     const Icon = settled === "failed" ? AlertTriangle : Square;
-    return <div role="status" aria-live="polite" className={`flex min-h-6 items-center gap-2 px-1 py-1 text-[11px] ${settled === "failed" ? "text-destructive" : "text-muted-foreground"}`}>
+    return <div role={settled === "failed" ? "alert" : "status"} aria-live="polite" data-reply-failed={settled === "failed" ? "" : undefined} className={`${row} ${settled === "failed" ? "text-destructive" : "text-muted-foreground"}`}>
       <Icon className="size-3.5 shrink-0" aria-hidden="true" />
       <span className="min-w-0 flex-1 font-medium">{settled === "failed" ? t.failed : t.interrupted}</span>
       {settled === "failed" && failure?.details && <DetailsPopover details={failure.details} />}
-      {settled === "failed" && failure?.action && <Button type="button" variant="outline" className="h-6 shrink-0 px-2 text-[10px]" disabled={failure.action.disabled} onClick={failure.action.run}>{failure.action.label}</Button>}
+      {settled === "failed" && failure?.action && <Button type="button" variant="outline" className={small} disabled={failure.action.disabled} onClick={failure.action.run}>{failure.action.label}</Button>}
     </div>;
   }
   if (!running && !text && notice) {
     const tone = notice.level === "error" ? "text-destructive" : notice.level === "warning" ? "text-amber-700 dark:text-amber-300" : "text-muted-foreground";
     const Icon = notice.level === "info" ? Info : AlertTriangle;
-    return <div role={notice.level === "info" ? "status" : "alert"} data-runtime-notice className={`flex min-h-6 items-center gap-2 px-1 py-1 text-[11px] ${tone}`}>
+    // An extension's failure is said in the interface language; its own words
+    // are behind Details. A command's reply is the runtime's answer, shown as is.
+    const words = notice.extension ? t.extensionFailed : notice.text;
+    return <div role={notice.level === "info" ? "status" : "alert"} data-runtime-notice className={`${row} ${tone}`}>
       <Icon className="size-3.5 shrink-0" aria-hidden="true" />
-      {notice.extension && <span className="shrink-0 font-medium">{t.extension}</span>}
-      <span className="min-w-0 flex-1 truncate" title={notice.text}>{notice.text}</span>
-      {notice.text.length > 80 && <DetailsPopover details={notice.text} />}
+      <span className="min-w-0 flex-1 truncate" title={words}>{words}</span>
+      {(notice.extension || notice.text.length > 80) && <DetailsPopover details={notice.text} />}
       <Button type="button" variant="ghost" className="size-6 shrink-0 p-0" aria-label={t.dismiss} onClick={notice.onDismiss}><X className="size-3" /></Button>
     </div>;
   }
-  if (!running && !text) return null;
-  if (!text) return <div role="status" aria-live="polite" className="flex min-h-6 items-center gap-2 px-1 py-1 text-[11px] text-muted-foreground">
+  if (!running && !text) return <div aria-hidden="true" data-status-line-idle className="h-8" />;
+  if (!text) return <div role="status" aria-live="polite" className={`${row} text-muted-foreground`}>
     <LoaderCircle className="size-3.5 shrink-0 animate-spin" aria-hidden="true" />
     <span>{label}</span>
     {elapsed && <span className="tabular-nums">{elapsed}</span>}
   </div>;
   const last = text.split(/\r?\n/u).filter(line => line.trim()).at(-1) ?? "";
-  return <div className="px-1 pb-1">
-    <button type="button" className="flex w-full min-w-0 items-center gap-2 rounded-md px-1 py-1 text-left text-[11px] text-muted-foreground hover:bg-muted/40" aria-expanded={open} onClick={() => setOpen(value => !value)}>
+  return <div className="px-1">
+    <button type="button" className="flex h-8 w-full min-w-0 items-center gap-2 rounded-md px-1 text-left text-[11px] text-muted-foreground hover:bg-muted/40" aria-expanded={open} onClick={() => setOpen(value => !value)}>
       <Brain className="size-3.5 shrink-0" aria-hidden="true" />
       <span className="shrink-0 font-medium text-foreground">Reasoning</span>
       <span className="min-w-0 flex-1 truncate">{last}</span>

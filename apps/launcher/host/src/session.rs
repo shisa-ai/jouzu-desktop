@@ -584,6 +584,8 @@ struct Run {
     started_at: String,
     /// Stop was asked for this run.
     stopping: bool,
+    /// The runtime refused the last Stop: its words, shown at Stop until it is pressed again.
+    stop_error: Option<String>,
     /// Its first reply has started. The runtime takes waiting steers once more
     /// just before its first model call, so a steer handed over earlier would
     /// be merged into the message that started it.
@@ -605,6 +607,7 @@ impl Run {
             row,
             started_at: Session::now_iso(),
             stopping: false,
+            stop_error: None,
             replying: false,
             echo_pending: true,
         }
@@ -621,6 +624,7 @@ impl Run {
             row: None,
             started_at: Session::now_iso(),
             stopping: false,
+            stop_error: None,
             replying: false,
             echo_pending: false,
         }
@@ -723,6 +727,8 @@ pub struct Session {
     model_answered: AtomicBool,
     /// The runtime's `get_available_models`, as it answered.
     models: Mutex<Vec<Value>>,
+    /// The runtime refused to list its models: its words, until a list arrives.
+    model_list_error: Mutex<Option<String>>,
     /// The runtime's `get_available_thinking_levels`, as it answered.
     thinking_levels: Mutex<Vec<Value>>,
     /// The reasoning level the runtime reports.
@@ -1881,6 +1887,10 @@ impl Session {
         let response_id = value.get("id").and_then(Value::as_str).unwrap_or("");
         if let Some(mut done) = self.command_answered(response_id) {
             done["success"] = value.get("success").cloned().unwrap_or(Value::Null);
+            // A refused command's words go with its answer, to the control that ran it.
+            if let Some(error) = value.get("error").filter(|_| value.get("success") == Some(&Value::Bool(false))) {
+                done["error"] = error.clone();
+            }
             self.publish("session.command_done", done);
         }
         if response_id == FLOW_RELEASE_ID {
@@ -1994,16 +2004,25 @@ impl Session {
                 return;
             }
             // Only a failed handshake makes the session unusable. Any other
-            // command fails alone: a command a client asked for answers that
-            // client (its request carries the runtime's text), and a refused
-            // prompt is that message's failure. Nothing is reported to the
-            // whole session.
-            // A refused level leaves the runtime's own; ask which one that is.
-            if reply == pi::Reply::SetThinkingLevel {
-                self.request_state();
-            }
-            if reply == pi::Reply::Prompt {
-                self.prompt_refused(response_id, message);
+            // command fails in its own scope: a command a client waits on
+            // answers that client (its request carries the runtime's text), a
+            // refused prompt is that message's failure, and the commands the
+            // host sends on its own (Stop's abort, the model lists) keep the
+            // runtime's words where their control reads them. Nothing is
+            // reported to the whole session.
+            match reply {
+                // A refused level leaves the runtime's own; ask which one that is.
+                pi::Reply::SetThinkingLevel => self.request_state(),
+                pi::Reply::Prompt => self.prompt_refused(response_id, message),
+                pi::Reply::Abort => self.stop_refused(message),
+                pi::Reply::AvailableModels => {
+                    *self
+                        .model_list_error
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(message.to_string());
+                    self.publish_summary();
+                }
+                _ => {}
             }
             return;
         }
@@ -2021,6 +2040,10 @@ impl Session {
                     .and_then(Value::as_array)
                     .cloned()
                     .unwrap_or_default();
+                *self
+                    .model_list_error
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
                 self.set_list(&self.models, models);
             }
             pi::Reply::AvailableThinkingLevels => {
@@ -2120,22 +2143,32 @@ impl Session {
         self.end_turn(client_message_id, json!({ "status": "handled" }));
     }
 
-    /// End the active turn for this message without a runtime run.
-    /// The runtime refused a prompt: that message got no reply. It becomes the
-    /// session's failed message (Retry sends it again), with the runtime's own
-    /// text; nothing else in the session changes.
+    /// The runtime refused a prompt. A message gets no reply: it becomes the
+    /// session's failed message (Retry sends it again) with the runtime's own
+    /// text, and the messages waiting behind it wait for Continue instead of
+    /// being refused one by one. A slash command's refusal is that command's
+    /// answer (`session.command_done`), never a failed message.
     fn prompt_refused(self: &Arc<Self>, client_message_id: &str, message: &str) {
-        let ours = self.run_guard().as_ref().is_some_and(|run| {
-            run.client_message_id.as_deref() == Some(client_message_id) && !run.phase.started()
-        });
-        if ours {
-            let text = self
-                .messages
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .get(client_message_id)
-                .map(|message| message.text.clone())
-                .unwrap_or_default();
+        // One lock decides and takes the run, so a Stop in between cannot
+        // leave a failed message that is never published.
+        let turn = {
+            let mut run = self.run_guard();
+            let ours = run.as_ref().is_some_and(|run| {
+                run.client_message_id.as_deref() == Some(client_message_id) && !run.phase.started()
+            });
+            if !ours {
+                return;
+            }
+            run.take().map(|run| run.id)
+        };
+        let text = self
+            .messages
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(client_message_id)
+            .map(|message| message.text.clone())
+            .unwrap_or_default();
+        if !text.trim_start().starts_with('/') {
             *self
                 .failed_turn
                 .lock()
@@ -2144,13 +2177,39 @@ impl Session {
                 "text": text,
                 "error": { "code": "prompt-refused", "text": message },
             }));
+            if !self.queue_guard().is_empty() {
+                self.queue_paused.store(true, Ordering::SeqCst);
+            }
         }
-        self.end_turn(
-            client_message_id,
-            json!({ "aborted": true, "reason": "prompt-refused", "message": message }),
-        );
+        if let Some(turn) = turn {
+            self.publish(
+                "turn.end",
+                json!({ "turnId": turn, "clientMessageId": client_message_id, "reason": "prompt-refused", "message": message }),
+            );
+        }
+        self.run_finished();
+        self.publish_summary();
     }
 
+    /// The runtime refused Stop: the run goes on, and Stop says why.
+    fn stop_refused(&self, message: &str) {
+        let changed = {
+            let mut run = self.run_guard();
+            match run.as_mut() {
+                Some(current) if current.stopping => {
+                    current.stopping = false;
+                    current.stop_error = Some(message.to_string());
+                    true
+                }
+                _ => false,
+            }
+        };
+        if changed {
+            self.publish_summary();
+        }
+    }
+
+    /// End the active turn for this message without a runtime run.
     fn end_turn(self: &Arc<Self>, client_message_id: &str, outcome: Value) {
         let turn = {
             let mut run = self.run_guard();
@@ -3261,6 +3320,7 @@ impl Session {
                 Some(current) if current.phase == RunPhase::Starting => Stop::Parked(run.take().expect("checked")),
                 Some(current) => {
                     current.stopping = true;
+                    current.stop_error = None;
                     Stop::Abort
                 }
             }
@@ -3761,10 +3821,14 @@ impl Session {
             .map(|attachment| (attachment.mime_type.as_str(), attachment.data.as_str()))
             .collect();
         let prompt = pi::command::with_id(pi::command::prompt(text, &images), client_message_id);
-        *self
-            .failed_turn
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        // A new message replaces the failed one; a slash command (such as the
+        // Flow command that rescues it) leaves it, with its Retry, in place.
+        if !text.trim_start().starts_with('/') {
+            *self
+                .failed_turn
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        }
         let stored_attachments = self.store_attachments(attachments)?;
         let mut row = json!({
             "kind": "user",
@@ -4465,6 +4529,7 @@ impl Session {
                 "phase": phase,
                 "step": self.step_view(),
                 "startedAt": run.started_at,
+                "stopError": run.stop_error,
             })
         })
     }
@@ -4520,6 +4585,11 @@ impl Session {
                 .clone(),
             "failure": self
                 .failure
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone(),
+            "modelListError": self
+                .model_list_error
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .clone(),
@@ -4624,6 +4694,7 @@ impl Session {
             model: Mutex::new(None),
             model_answered: AtomicBool::new(false),
             models: Mutex::new(Vec::new()),
+            model_list_error: Mutex::new(None),
             thinking_levels: Mutex::new(Vec::new()),
             first_output: Mutex::new(FirstOutput::default()),
             warm_attach: Mutex::new(None),
@@ -6303,7 +6374,6 @@ impl SessionManager {
             .get(id)
             .cloned()
     }
-
 
     pub fn create(
         &self,

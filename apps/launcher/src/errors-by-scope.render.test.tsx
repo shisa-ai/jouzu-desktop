@@ -40,6 +40,18 @@ describe("the session's one error takes the composer's place", () => {
     expect(html).not.toContain("runtime exited");
   });
 
+  it("a restart that failed says so beside its button", () => {
+    const html = composer({ blocked: { text: "x", action: { label: "Restart session", run: noop }, result: { ok: false, text: "This session could not be opened." } } });
+    expect(html).toContain('aria-label="This session could not be opened."');
+  });
+
+  it("an image that could not be attached is marked at the + menu, not written into the composer", () => {
+    const html = composer({ results: { attach: { ok: false, text: "The images were not attached.", details: "too large" } } });
+    expect(html).toContain('aria-label="The images were not attached."');
+    expect(html).not.toContain("too large");
+    expect(html).not.toContain('<p role="alert"');
+  });
+
   it("is otherwise the composer, with results at their controls only", () => {
     const html = composer({ results: { model: { ok: false, text: "The model was not changed." } } });
     expect(html).toContain("<textarea");
@@ -64,14 +76,39 @@ describe("a failure is shown on the thing that failed", () => {
 
   it("the runtime's notice is one line, never a list", () => {
     const html = renderToStaticMarkup(<AgentAction thinking="" label="" running={false} notice={{ text: "flow guard crashed", level: "error", extension: true, onDismiss: noop }} />);
-    expect(html).toContain("Extension");
+    // Said in the interface language; the extension's own words are behind Details.
+    expect(html).toContain(chatTexts.en.extensionFailed);
+    expect(html).not.toContain("flow guard crashed");
     expect(html.match(/data-runtime-notice/gu)).toHaveLength(1);
   });
 
-  it("a result at a control is a fixed-size mark whose words are its label", () => {
+  it("a result at a control is a badge that takes no room, whose words are its label", () => {
     const html = renderToStaticMarkup(<ResultMark result={{ ok: true, text: "Conversation exported." }} />);
     expect(html).toContain('data-result="ok"');
-    expect(html).toContain("size-6");
+    expect(html).toMatch(/data-result-anchor="true" class="[^"]*\bh-0 w-0\b/u);
+    expect(html).toMatch(/data-result="ok"[^>]*class="absolute /u);
+  });
+
+  it("an idle status line keeps its row, so a failure appearing moves nothing", () => {
+    const idle = renderToStaticMarkup(<AgentAction thinking="" label="" running={false} />);
+    const failed = renderToStaticMarkup(<AgentAction thinking="" label="" running={false} settled="failed" />);
+    expect(idle).toContain("h-8");
+    expect(failed).toContain("h-8");
+    expect(failed).toContain('role="alert"');
+  });
+
+  it("a message that got no reply offers Retry beside the recovery its text points to", () => {
+    const html = renderToStaticMarkup(<AgentAction thinking="" label="" running={false} noReply={{ text: "hi", onRetry: noop, action: { label: "Clear Flow history", run: noop } }} />);
+    expect(html).toContain("Clear Flow history");
+    expect(html).toContain(">Retry<");
+  });
+
+  it("a Flow hold is on the status line with what lets it go", () => {
+    const html = renderToStaticMarkup(<AgentAction thinking="" label="" running={false} hold={{ details: "budget", paused: true, onResume: noop, onRelease: noop, onOff: noop }} />);
+    expect(html).toContain(chatTexts.en.flowHolding);
+    expect(html).toContain(">Resume<");
+    expect(html).toContain(">Release<");
+    expect(html).not.toContain("budget");
   });
 });
 

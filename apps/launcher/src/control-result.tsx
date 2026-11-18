@@ -19,12 +19,13 @@ export interface ControlResult {
 }
 
 /** The controls in a session whose results are shown at the control itself. */
-export type SessionControl = "send" | "model" | "stop" | "commands" | "flow" | "textguard" | "branch" | "queue";
+export type SessionControl = "send" | "model" | "stop" | "commands" | "attach" | "flow" | "textguard" | "branch" | "queue" | "restart";
 
 /**
- * A fixed-size mark beside a control: a check or a warning icon. Its words are
- * the tooltip; pressing it shows them with Details and the follow-up action in a
- * popover, so nothing around it moves or grows.
+ * A badge on the corner of the control it follows: a check or a warning icon.
+ * It takes no room in the layout (a zero-width anchor), so a result appearing or
+ * clearing moves nothing. Its words are the tooltip; pressing it shows them with
+ * Details and the follow-up action in a popover.
  */
 export function ResultMark({ result, align = "right", side = "top" }: { result?: ControlResult | null; align?: "left" | "right"; side?: "top" | "bottom" }) {
   const t = useChatText();
@@ -41,11 +42,11 @@ export function ResultMark({ result, align = "right", side = "top" }: { result?:
   }, [open]);
   if (!result) return null;
   const Icon = result.ok ? Check : AlertTriangle;
-  return <span ref={root} className="relative inline-flex shrink-0">
-    <button type="button" data-result={result.ok ? "ok" : "failed"} aria-label={result.text} title={result.text} aria-expanded={open} onClick={() => setOpen(value => !value)} className={`flex size-6 items-center justify-center rounded ${result.ok ? "text-primary" : "text-destructive"} hover:bg-muted/60`}>
-      <Icon className="size-3.5" aria-hidden="true" />
+  return <span ref={root} data-result-anchor className="relative block h-0 w-0 shrink-0 self-start">
+    <button type="button" data-result={result.ok ? "ok" : "failed"} aria-label={result.text} title={result.text} aria-expanded={open} onClick={() => setOpen(value => !value)} className={`absolute -top-1.5 -left-2.5 z-10 flex size-4 items-center justify-center rounded-full border border-border bg-background shadow-sm ${result.ok ? "text-primary" : "text-destructive"} hover:bg-muted`}>
+      <Icon className="size-2.5" aria-hidden="true" />
     </button>
-    {open && <span role={result.ok ? "status" : "alert"} className={`absolute ${side === "top" ? "bottom-full mb-1" : "top-full mt-1"} ${align === "right" ? "right-0" : "left-0"} z-50 block w-[min(20rem,calc(100vw-2rem))] rounded-lg border border-border bg-popover p-2 text-left text-[11px] text-foreground shadow-xl`}>
+    {open && <span role={result.ok ? "status" : "alert"} className={`absolute ${side === "top" ? "bottom-2 mb-1" : "top-3 mt-1"} ${align === "right" ? "right-0" : "left-0"} z-50 block w-[min(20rem,calc(100vw-2rem))] rounded-lg border border-border bg-popover p-2 text-left text-[11px] text-foreground shadow-xl`}>
       <span className="block break-words">{result.text}</span>
       {result.action && <Button type="button" variant="outline" className="mt-1.5 h-6 px-2 text-[10px]" onClick={() => { setOpen(false); result.action?.run(); }}>{result.action.label}</Button>}
       {result.details && <span className="mt-1.5 block">

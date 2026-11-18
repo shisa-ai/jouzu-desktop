@@ -4568,6 +4568,60 @@ mod session_tests {
     }
 
     #[tokio::test]
+    async fn a_refused_slash_command_is_its_answer_and_leaves_the_failed_message() {
+        let (manager, _home, workspace) = manager(50);
+        let session = manager
+            .create(workspace.path().to_str().unwrap(), None, None)
+            .unwrap();
+        wait_status(&session, Status::Idle).await;
+        session.send("refused-1", "REFUSE Request history is full").unwrap();
+        wait_until(|| !session.summary()["failedTurn"].is_null()).await;
+        wait_status(&session, Status::Idle).await;
+        // The command meant to rescue it is refused: that is the command's answer.
+        session.send("command-1", "/refuse nothing to clear").unwrap();
+        wait_until(|| {
+            session.events_after(1).0.iter().any(|event| {
+                event.event == "session.command_done" && event.data["id"] == "command-1"
+            })
+        })
+        .await;
+        let (events, _) = session.events_after(1);
+        let done = events
+            .iter()
+            .find(|event| event.event == "session.command_done" && event.data["id"] == "command-1")
+            .unwrap();
+        assert_eq!(done.data["success"], false, "{:?}", done.data);
+        assert_eq!(done.data["error"], "nothing to clear", "{:?}", done.data);
+        wait_status(&session, Status::Idle).await;
+        // The failed message, and its Retry, are still the refused message.
+        let summary = session.summary();
+        assert_eq!(summary["failedTurn"]["clientMessageId"], "refused-1", "{summary}");
+        manager.stop_all();
+    }
+
+    #[tokio::test]
+    async fn a_refused_stop_says_so_at_stop_and_the_run_goes_on() {
+        let (manager, _home, workspace) = manager_with_env(
+            200,
+            &[("FAKE_RUNTIME_DELAY_MS", "60"), ("FAKE_RUNTIME_REFUSE_ABORT", "1")],
+        );
+        let session = manager
+            .create(workspace.path().to_str().unwrap(), None, None)
+            .unwrap();
+        wait_status(&session, Status::Idle).await;
+        session.send("first", "a reply that is long enough to stop part way").unwrap();
+        wait_until(|| session.summary()["activeTurn"]["phase"] == "running").await;
+        assert_eq!(session.interrupt().unwrap()["status"], "cancelling");
+        wait_until(|| session.summary()["activeTurn"]["stopError"] == "abort refused").await;
+        let summary = session.summary();
+        // Not "Stopping…" forever: the run is running, and Stop says why it did not stop.
+        assert_eq!(summary["activeTurn"]["phase"], "running", "{summary}");
+        assert!(summary["failure"].is_null(), "{summary}");
+        wait_status(&session, Status::Idle).await;
+        manager.stop_all();
+    }
+
+    #[tokio::test]
     async fn model_and_thinking_endpoints_update_the_session() {
         let (manager, _home, workspace) = manager(50);
         let session = manager

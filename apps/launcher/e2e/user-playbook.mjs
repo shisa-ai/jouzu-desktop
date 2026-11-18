@@ -336,7 +336,8 @@ const longPrompt = "SLOW: count from 1 to 300, one number per line, nothing else
  * paused after an interrupt…"): the runtime's own notice that Stop worked, not a
  * problem, so it is not counted.
  */
-const alerts = () => page.getByRole("alert").filter({ hasNotText: /Flow control paused after an interrupt/i });
+// Anything shown as failed: a failure line (role=alert) or a failed mark at a control.
+const alerts = () => page.locator('[role="alert"], [data-result="failed"]').filter({ hasNotText: /Flow control paused after an interrupt/i });
 const queued = () => page.getByRole("region", { name: "Queued messages" });
 const userCount = text => conversation().getByText(text, { exact: true }).count();
 /** The composer's submit button: "Send" when idle, "Steer" while a reply runs. */

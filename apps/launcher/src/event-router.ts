@@ -14,6 +14,9 @@ class EventRouter {
   private lastSeq = 0;
   private stopped = false;
   private retry?: ReturnType<typeof setTimeout>;
+  /** Whether the page's one stream is open; false only after it was open and dropped. */
+  private online = true;
+  private readonly statusListeners = new Set<() => void>();
 
   start(client: HostClient): void {
     this.client = client;
@@ -26,6 +29,22 @@ class EventRouter {
     return () => { this.listeners.delete(listener); };
   }
 
+  /** The stream dropped and is being reopened (ui-layer §5: "Reconnecting…"). */
+  get reconnecting(): boolean {
+    return !this.online;
+  }
+
+  onStatus(listener: () => void): () => void {
+    this.statusListeners.add(listener);
+    return () => { this.statusListeners.delete(listener); };
+  }
+
+  private setOnline(online: boolean): void {
+    if (this.online === online) return;
+    this.online = online;
+    for (const listener of this.statusListeners) listener();
+  }
+
   private connect(): void {
     if (!this.client || this.stopped) return;
     this.unsubscribe?.();
@@ -33,7 +52,8 @@ class EventRouter {
       this.client.clientId,
       this.lastSeq,
       event => this.receive(event),
-      () => this.scheduleReconnect(),
+      () => { this.setOnline(false); this.scheduleReconnect(); },
+      () => this.setOnline(true),
     );
   }
 

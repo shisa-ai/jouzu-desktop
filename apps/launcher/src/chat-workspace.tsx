@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { ArrowUpCircle, ArrowUpDown, Archive, ArchiveRestore, Check, ChevronDown, ChevronRight, Copy, FolderOpen, FolderPlus, Images, MessageSquare, MoreHorizontal, PanelLeft, Columns2, PanelRight, Pencil, Pin, Plus, RefreshCw, Search, Settings, Sparkles, X } from "lucide-react";
 import { Button } from "./components/ui/button";
 import { Input } from "./components/ui/input";
@@ -119,6 +119,8 @@ export function ChatWorkspace({ path, revision = 0, newSession = true, locked = 
   const chatUnavailable = !api.capabilities.features.includes("chat");
   const t = useChatText();
   const [snapshot, setSnapshot] = useState<ChatSnapshot>({ projection: emptyProjection(), connected: false, pending: false, connectionError: null, models: [], thinkingLevels: [] });
+  // The page's one event stream dropped and is being reopened (ui-layer §5).
+  const reconnecting = useSyncExternalStore(listener => eventRouter.onStatus(listener), () => eventRouter.reconnecting);
   const [now, setNow] = useState(Date.now());
   useEffect(() => {
     if (!snapshot.projection.running) return;
@@ -135,7 +137,6 @@ export function ChatWorkspace({ path, revision = 0, newSession = true, locked = 
   const draftKeyRef = useRef("");
   const [attachments, setAttachments] = useState<ImageAttachment[]>([]);
   const attachmentRef = useRef(attachments);
-  const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const [videoUrls, setVideoUrls] = useState<string[]>([]);
   const videoRef = useRef(videoUrls);
   videoRef.current = videoUrls;
@@ -191,6 +192,11 @@ export function ChatWorkspace({ path, revision = 0, newSession = true, locked = 
   function failedAt(control: SessionControl, error: unknown, text: string) {
     settle(control, { ok: false, ...explain(t, error, text) });
   }
+  /** Whether the session on screen is still the one an action started on: a late result never lands on another session. */
+  function onScreen() {
+    const at = selectedSessionRef.current;
+    return () => selectedSessionRef.current === at;
+  }
   // A branch's result is shown on the turn it was branched from.
   const [forkResult, setForkResult] = useState<{ turn: number; result: ControlResult } | null>(null);
   // A new session that could not start while nothing else is on screen: the
@@ -198,6 +204,16 @@ export function ChatWorkspace({ path, revision = 0, newSession = true, locked = 
   const [startError, setStartError] = useState<{ details?: string } | null>(null);
   // Sidebar actions (pin, rename, archive, copy) report in the sidebar.
   const [sidebarNote, setSidebarNote] = useState<{ text: string; details?: string } | null>(null);
+  const sidebarOpen = useRef(true);
+  /**
+   * Opening a session or starting a new one is asked for in the sidebar, so it
+   * reports there; with the sidebar closed (a recovery button, a shortcut) the
+   * composer's Send mark says it instead, so it is never silent.
+   */
+  function tellWhereAsked(result: { text: string; details?: string }) {
+    if (sidebarOpen.current) setSidebarNote(result);
+    else settle("send", { ok: false, ...result });
+  }
   const [renaming, setRenaming] = useState<{ path: string; title: string } | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
   const [dismissed, setDismissed] = useState<{ notice?: number }>({});
@@ -229,6 +245,7 @@ export function ChatWorkspace({ path, revision = 0, newSession = true, locked = 
   const [sidebar, setSidebarState] = useState(() => {
     try { return localStorage.getItem("jouzu.ui.sidebar") !== "closed"; } catch { return true; }
   });
+  sidebarOpen.current = sidebar;
   // Persist the user's choice: the workspace remounts when the app moves through
   // runtime/setup screens, and a local default would reopen it behind their back.
   const setSidebar = (value: boolean | ((current: boolean) => boolean)) => {
@@ -299,7 +316,7 @@ export function ChatWorkspace({ path, revision = 0, newSession = true, locked = 
     setDraft(next?.text ?? "");
     attachmentRef.current = next?.attachments ?? [];
     setAttachments(next?.attachments ?? []);
-    setAttachmentError(null);
+    settle("attach", null);
   }
   function bindClient(next: ChatConnection) {
     unsubscribeRef.current?.();
@@ -471,9 +488,11 @@ export function ChatWorkspace({ path, revision = 0, newSession = true, locked = 
   // its job, except a failure at a control, which stays until that control is used.
   useEffect(() => {
     if (!snapshot.projection.running) return;
-    setResults(current => Object.fromEntries(Object.entries(current).filter(([control, result]) => !result.ok && control !== "send")));
+    // Send, Stop and the queue belong to the run that just ended.
+    setResults(current => Object.fromEntries(Object.entries(current).filter(([control, result]) => !result.ok && !["send", "stop", "queue"].includes(control))));
     setForkResult(null);
-    if (snapshot.notice) setDismissed(current => ({ ...current, notice: snapshot.notice?.id }));
+    // A command's reply has done its job; an extension's failure stays until dismissed.
+    if (snapshot.notice && snapshot.notice.source !== "extension") setDismissed(current => ({ ...current, notice: snapshot.notice?.id }));
   }, [snapshot.projection.running]);
   // A model arrived: a send that waited for one can go now.
   useEffect(() => { if (snapshot.modelId) settle("send", null); }, [snapshot.modelId]);
@@ -580,14 +599,14 @@ export function ChatWorkspace({ path, revision = 0, newSession = true, locked = 
   }
   async function addImages(files: File[]) {
     if (readingRef.current || !files.length) return;
-    readingRef.current = true; setReadingImages(true); setAttachmentError(null);
+    readingRef.current = true; setReadingImages(true); settle("attach", null);
     try {
       validateImageSelection(attachmentRef.current, files);
       const added = await Promise.all(files.map(readImageAttachment));
       validateImageSelection(attachmentRef.current, added.map(item => ({ size: item.size, type: item.image.mimeType })));
       if (!fitsSendBudget([...attachmentRef.current, ...added])) throw new Error("These images are too large to send together. Send fewer, or smaller ones.");
       updateAttachments([...attachmentRef.current, ...added]);
-    } catch (error) { setAttachmentError(describeError(error)); }
+    } catch (error) { failedAt("attach", error, t.attachFailed); }
     finally { readingRef.current = false; setReadingImages(false); }
   }
   // "Quote" on an image artifact feeds the artifact through the same attachment
@@ -605,7 +624,7 @@ export function ChatWorkspace({ path, revision = 0, newSession = true, locked = 
           const bytes = new Uint8Array(binary.length);
           for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
           await addImagesRef.current([new File([bytes], data.name, { type: data.mimeType })]);
-        } catch (error) { setAttachmentError(describeError(error)); }
+        } catch (error) { failedAt("attach", error, t.attachFailed); }
       })();
     };
     window.addEventListener("jouzu:use-artifact", handler);
@@ -623,7 +642,7 @@ export function ChatWorkspace({ path, revision = 0, newSession = true, locked = 
         const bytes = new Uint8Array(binary.length);
         for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
         images.push(new File([bytes], data.name, { type: data.mimeType }));
-      } catch (error) { setAttachmentError(explain(t, error, "Could not read a dropped image.").text); }
+      } catch (error) { failedAt("attach", error, t.attachFailed); }
     }
     if (images.length) await addImages(images);
     if (files.length) {
@@ -815,7 +834,7 @@ export function ChatWorkspace({ path, revision = 0, newSession = true, locked = 
         setPreview(null);
         // Shown where it was asked for: the start page's composer, or the sidebar's
         // New session when the previous session is back on screen.
-        if (previousFile) setSidebarNote(explain(t, error, t.newSessionFailed));
+        if (previousFile) tellWhereAsked(explain(t, error, t.newSessionFailed));
         else setStartError({ details: explain(t, error, t.newSessionFailed).details });
       } finally {
         switchingRef.current = false;
@@ -830,6 +849,7 @@ export function ChatWorkspace({ path, revision = 0, newSession = true, locked = 
   async function reloadSession() {
     const client = connection.current;
     if (!client || commandBusy) return;
+    const here = onScreen();
     beginCommand();
     try {
       settle("commands", null);
@@ -837,13 +857,14 @@ export function ChatWorkspace({ path, revision = 0, newSession = true, locked = 
       const active = connection.current;
       if (!active) return;
       await active.reloadSession();
-    } catch (error) { failedAt("commands", error, t.reloadFailed); }
+    } catch (error) { if (here()) failedAt("commands", error, t.reloadFailed); }
     finally { endCommand(); }
   }
   /** Run an action on the attached session; its result is shown at `control`. */
   async function withSession(control: SessionControl, action: (session: ChatConnection) => Promise<void>, failed: string) {
     const client = connection.current;
     if (!client || commandBusy) return;
+    const here = onScreen();
     beginCommand();
     settle(control, null);
     try {
@@ -851,7 +872,7 @@ export function ChatWorkspace({ path, revision = 0, newSession = true, locked = 
       const active = connection.current;
       if (active) await action(active);
     }
-    catch (error) { failedAt(control, error, failed); }
+    catch (error) { if (here()) failedAt(control, error, failed); }
     finally { endCommand(); }
   }
   function runFlow(verb: "clear" | "resume" | "off" | "on" | "status") {
@@ -870,6 +891,7 @@ export function ChatWorkspace({ path, revision = 0, newSession = true, locked = 
   async function selectSessionModel(provider: string, id: string) {
     const client = connection.current;
     if (!client || commandBusy) return;
+    const here = onScreen();
     beginCommand();
     try {
       settle("model", null);
@@ -878,12 +900,13 @@ export function ChatWorkspace({ path, revision = 0, newSession = true, locked = 
       if (!active) return;
       await active.selectModel(provider, id);
     }
-    catch (error) { failedAt("model", error, t.modelFailed); }
+    catch (error) { if (here()) failedAt("model", error, t.modelFailed); }
     finally { endCommand(); }
   }
   async function selectThinkingLevel(level: string) {
     const client = connection.current;
     if (!client || commandBusy) return;
+    const here = onScreen();
     beginCommand();
     try {
       settle("model", null);
@@ -892,7 +915,7 @@ export function ChatWorkspace({ path, revision = 0, newSession = true, locked = 
       if (!active) return;
       await active.setThinkingLevel(level);
     }
-    catch (error) { failedAt("model", error, t.thinkingFailed); }
+    catch (error) { if (here()) failedAt("model", error, t.thinkingFailed); }
     finally { endCommand(); }
   }
   async function recoverSession(sourcePath?: string): Promise<boolean> {
@@ -972,7 +995,7 @@ export function ChatWorkspace({ path, revision = 0, newSession = true, locked = 
       previewRequest.current += 1;
       setPreview(null);
       // The row that was clicked is where it was asked for.
-      setSidebarNote(explain(t, error, t.openFailed));
+      tellWhereAsked(explain(t, error, t.openFailed));
     } finally {
       switchingRef.current = false;
       switchingTarget.current = null;
@@ -1018,10 +1041,12 @@ export function ChatWorkspace({ path, revision = 0, newSession = true, locked = 
         // and closing would stop it.
         stale.dispose();
         setSessionError(null);
+        settle("restart", null);
         void refreshSessions();
         return true;
       } catch (error) {
-        if (connection.current === stale) failedAt("send", error, t.openFailed);
+        // "Restart session" reports on its own button; a stopped session reopened for a send reports at Send.
+        if (connection.current === stale) failedAt(stale.snapshot.status === "error" ? "restart" : "send", error, t.openFailed);
         return false;
       } finally {
         switchingRef.current = false;
@@ -1155,6 +1180,7 @@ export function ChatWorkspace({ path, revision = 0, newSession = true, locked = 
     // The branch button is unavailable while the session loads (`forkDisabled`).
     if (switchingRef.current || snapshot.pending || !snapshot.connected) return;
     setForkResult(null);
+    const here = onScreen();
     let branch: string;
     try {
       // Fork copies the session on screen, so that session is attached first, the same way
@@ -1165,7 +1191,7 @@ export function ChatWorkspace({ path, revision = 0, newSession = true, locked = 
       // Copy the session through the clicked turn (its user message, replies and tool
       // results) into a new saved session. No runtime fork semantics change.
       branch = await api.sessions.branch(source, turn);
-    } catch (error) { setForkResult({ turn, result: { ok: false, ...explain(t, error, t.branchFailed) } }); return; }
+    } catch (error) { if (here()) setForkResult({ turn, result: { ok: false, ...explain(t, error, t.branchFailed) } }); return; }
     // The branch is an ordinary saved session: open it the way a sidebar click does.
     selectedSessionRef.current = branch;
     setSelectedSession(branch);
@@ -1195,6 +1221,7 @@ export function ChatWorkspace({ path, revision = 0, newSession = true, locked = 
   async function exportConversation() {
     const client = connection.current;
     if (!client || !snapshot.connected || commandBusy) return;
+    const here = onScreen();
     let selected: string | null;
     settle("commands", null);
     try { selected = await api.native.saveFile({ title: "Export conversation", defaultPath: `${name}-conversation.html`, filters: [{ name: "HTML", extensions: ["html"] }] }); }
@@ -1207,7 +1234,7 @@ export function ChatWorkspace({ path, revision = 0, newSession = true, locked = 
       if (!active) return;
       await active.exportHtml(selected);
       if (connection.current === active) settle("commands", { ok: true, text: t.exported, details: selected, action: { label: t.showFile, run: () => void api.native.reveal(selected).catch(() => {}) } });
-    } catch (error) { if (connection.current) failedAt("commands", error, t.exportFailed); }
+    } catch (error) { if (here()) failedAt("commands", error, t.exportFailed); }
     finally { endCommand(); }
   }
   async function switchWorkspace(next: string) {
@@ -1427,7 +1454,8 @@ export function ChatWorkspace({ path, revision = 0, newSession = true, locked = 
   const textguardAlert = showingAttached ? snapshot.textguard?.alert : undefined;
   const textguardControl = snapshot.sessionId ? {
     mode: textguardMode,
-    alert: !!textguardAlert,
+    alert: textguardAlert || undefined,
+    onDismissAlert: () => connection.current?.dismissTextGuardAlert(),
     // A saved session on screen changes its mode the way it changes its model:
     // the choice attaches it first (`withSession`).
     disabled: commandBusy || composerRunning,
@@ -1454,7 +1482,7 @@ export function ChatWorkspace({ path, revision = 0, newSession = true, locked = 
   // The one thing that ever takes the composer's place: the session cannot go on.
   const sessionFailure = showingAttached && snapshot.status === "error" ? snapshot.failure ?? { code: "", text: "" } : null;
   const blocked = sessionFailure
-    ? { text: failureText(t, sessionFailure.code), details: sessionFailure.text || undefined, action: { label: t.restartSession, run: () => void reopenBoundSession(), disabled: commandBusy || switching } }
+    ? { text: failureText(t, sessionFailure.code), details: sessionFailure.text || undefined, action: { label: t.restartSession, run: () => { settle("restart", null); void reopenBoundSession(); }, disabled: commandBusy || switching }, result: results.restart }
     : sessionError
       ? { text: t.openFailed, details: sessionError, action: selectedSession ? { label: t.retry, run: () => { setSessionError(null); startSwitch(selectedSession); } } : undefined }
       : null;
@@ -1465,11 +1493,31 @@ export function ChatWorkspace({ path, revision = 0, newSession = true, locked = 
     onRetry: () => changeQueue(client => client.queue("retry"), "send"),
     action: recoveryFor(failedTurn.error?.text),
   } : null;
+  // Results the host keeps for controls it acts on by itself: Stop's abort and the model list.
+  const stopError = showingAttached ? snapshot.activeTurn?.stopError : undefined;
+  const modelListError = showingAttached ? snapshot.modelListError : undefined;
+  const controlResults: Partial<Record<SessionControl, ControlResult>> = {
+    ...results,
+    ...(!results.stop && stopError ? { stop: { ok: false, text: t.stopFailed, details: stopError } } : {}),
+    ...(!results.model && modelListError ? { model: { ok: false, text: t.modelsFailed, details: modelListError } } : {}),
+  };
+  const hold = flowHold ? {
+    details: flowHold.text,
+    paused: flowHold.paused,
+    busy: commandBusy,
+    onResume: () => void runFlow("resume"),
+    onRelease: () => void runFlow("clear"),
+    onOff: () => void runFlow("off"),
+  } : null;
   const runtimeNotice = showingAttached && snapshot.notice && snapshot.notice.id !== dismissed.notice
     ? { text: snapshot.notice.text, level: snapshot.notice.level, extension: snapshot.notice.source === "extension", onDismiss: () => setDismissed(current => ({ ...current, notice: snapshot.notice?.id })) }
     : null;
   async function editQueued(clientMessageId: string) {
-    const taken = await connection.current?.takeQueued(clientMessageId);
+    const client = connection.current;
+    settle("queue", null);
+    let taken: Awaited<ReturnType<ChatConnection["takeQueued"]>> | undefined;
+    try { taken = await client?.takeQueued(clientMessageId); }
+    catch (error) { if (connection.current === client) failedAt("queue", error, t.queueFailed); return; }
     if (!taken) return;
     const current = draftRef.current;
     updateDraft(current.trim() ? `${taken.text}\n\n${current}` : taken.text);
@@ -1481,7 +1529,7 @@ export function ChatWorkspace({ path, revision = 0, newSession = true, locked = 
   // so a sideways wheel or scrollIntoView cannot shift it (#113).
   return <div ref={chatRoot} className="relative flex min-h-0 min-w-0 flex-1 overflow-clip">
     {dropActive && <div className="pointer-events-none absolute inset-0 z-40 flex items-center justify-center border-2 border-dashed border-primary bg-background/85 text-sm font-medium text-primary">Drop images or files</div>}
-    {sidebar && <aside aria-label="Workspaces" className="absolute inset-y-0 left-0 z-20 flex w-80 max-w-[85%] flex-col border-r border-border bg-background shadow-xl md:static md:z-auto md:shadow-none">
+    {sidebar && <aside aria-label="Workspaces" className="absolute inset-y-0 left-0 z-20 flex w-80 max-w-[85%] flex-col border-r border-border bg-background shadow-xl md:relative md:z-auto md:shadow-none">
       <div className="flex items-center gap-2 px-2 pb-2 pt-3"><Button className="min-w-0 flex-1 justify-start gap-2" disabled={locked} onClick={() => void startNewSession()}><Plus className="size-4" />New session</Button><Button variant="ghost" className="size-8 p-0 md:hidden" aria-label="Hide workspaces" onClick={() => setSidebar(false)}><X className="size-4" /></Button></div>
       <div className="px-2 pb-2"><Button variant={appView === "artifacts" ? "default" : "ghost"} className="w-full justify-start gap-2" aria-pressed={appView === "artifacts"} onClick={() => setAppView(appView === "artifacts" ? "chat" : "artifacts")}><Images className="size-4" />Artifacts</Button></div>
       <div className="flex items-center justify-between border-t border-border px-3 py-2">
@@ -1494,7 +1542,8 @@ export function ChatWorkspace({ path, revision = 0, newSession = true, locked = 
         </div>
       </div>
       {folderNotice && <div className="px-2 pb-2">{folderNotice}</div>}
-      {sidebarNote && <div className="px-2 pb-2"><NoticeRow alert={{ id: "sidebar", level: "error", text: sidebarNote.text, details: sidebarNote.details, actions: [], dismiss: () => setSidebarNote(null) }} /></div>}
+      {/* Over the bottom of the list, so the list never moves. */}
+      {sidebarNote && <div className="absolute inset-x-2 bottom-14 z-10 rounded-lg bg-background shadow-lg"><NoticeRow alert={{ id: "sidebar", level: "error", text: sidebarNote.text, details: sidebarNote.details, actions: [], dismiss: () => setSidebarNote(null) }} /></div>}
       {searchOpen && <div className="px-2 pb-2"><Input autoFocus aria-label="Search sessions" placeholder="Search sessions" value={search} onChange={event => setSearch(event.target.value)} /></div>}
       <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-1.5 pb-2">
         {[...regularGroups, ...(defaultGroup ? [defaultGroup] : [])].map(group => {
@@ -1544,11 +1593,13 @@ export function ChatWorkspace({ path, revision = 0, newSession = true, locked = 
         <Button variant="ghost" className="size-8 shrink-0 p-0" aria-label={sidebar ? "Hide workspaces" : "Show workspaces"} title="Workspaces" aria-expanded={sidebar} onClick={() => setSidebar(value => !value)}><PanelLeft className="size-4" /></Button>
         <div className="flex min-w-0 flex-1 items-center gap-2">
           <h2 className="max-w-60 min-w-0 shrink-0 truncate text-sm font-semibold" title={`${name} · ${path}${snapshot.model ? ` · ${snapshot.model}` : ""}`}>{selectedTitle ?? name}</h2>
-          {!chatUnavailable && !snapshot.connected && !snapshot.connectionError && <span className="h-7 shrink-0 rounded-md border border-border px-2 text-xs leading-7 text-muted-foreground">{t.starting}</span>}
+          {reconnecting || snapshot.connectionError
+            ? <span role="status" data-reconnecting title={snapshot.connectionError ?? undefined} className="h-7 shrink-0 rounded-md border border-amber-500/40 px-2 text-xs leading-7 text-amber-700 dark:text-amber-300">{t.reconnecting}</span>
+            : !chatUnavailable && !snapshot.connected && <span className="h-7 shrink-0 rounded-md border border-border px-2 text-xs leading-7 text-muted-foreground">{t.starting}</span>}
           <div className="hidden min-w-0 items-center gap-1.5 md:flex">
             <SubagentMenu agents={subagents} widgets={snapshot.widgets ?? {}} statuses={snapshot.statuses ?? {}} />
             <BackgroundMenu jobs={flow.background} widgets={snapshot.widgets ?? {}} statuses={snapshot.statuses ?? {}} />
-            <FlowMenu key={snapshot.sessionId ?? path} flow={flow} widgets={snapshot.widgets ?? {}} statuses={snapshot.statuses ?? {}} notice={flowHold?.text} error={flowError} reports={reportsSession && normalizedPath(reportsSession) === activeSession ? mergeReports(diskReports, snapshot.projection.flowReports) : []} onCommand={command => void runFlowCommand(command)} busy={commandBusy || composerRunning} result={results.flow} />
+            <FlowMenu key={snapshot.sessionId ?? path} flow={flow} widgets={snapshot.widgets ?? {}} statuses={snapshot.statuses ?? {}} error={flowError} reports={reportsSession && normalizedPath(reportsSession) === activeSession ? mergeReports(diskReports, snapshot.projection.flowReports) : []} onCommand={command => void runFlowCommand(command)} busy={commandBusy || composerRunning} result={results.flow} />
             <McpMenu onReload={() => void reloadSession()} onAsk={() => updateDraft("Add an MCP server to this workspace. Ask me for the name, transport, target, and any required environment variables.")} />
           </div>
         </div>
@@ -1566,7 +1617,7 @@ export function ChatWorkspace({ path, revision = 0, newSession = true, locked = 
           <div className="mb-2 flex flex-wrap items-center gap-2 px-1">{workspacePicker}</div>
           {promptNode && <div className="mb-3">{promptNode}</div>}
           {banners}
-          <Composer hero blocked={heroBlocked} results={results} connected={snapshot.connected} pending={snapshot.pending || locked } settling={commandBusy} opening={switching || opening || booting} starting={composerStarting} running={composerRunning} draft={draft} onDraft={updateDraft} onSend={() => void send()} onStop={stop} onCompact={() => void compactConversation()} onExport={() => void exportConversation()} onReloadMcp={() => void reloadSession()} attachments={attachments} onAddImages={files => void addImages(files)} onRemoveImage={id => updateAttachments(attachmentRef.current.filter(item => item.id !== id))} readingImages={readingImages} videos={videoUrls} onAddVideo={addVideoUrl} onRemoveVideo={removeVideoUrl} models={snapshot.models ?? []} model={snapshot.model} modelState={snapshot.modelState ?? "resolving"} onSelectModel={(provider, id) => void selectSessionModel(provider, id)} onSetupModel={onSettings} thinkingLevel={snapshot.thinkingLevel} thinkingLevels={snapshot.thinkingLevels ?? []} onThinkingLevel={level => void selectThinkingLevel(level)} />
+          <Composer hero blocked={heroBlocked} results={controlResults} connected={snapshot.connected} pending={snapshot.pending || locked } settling={commandBusy} opening={switching || opening || booting} starting={composerStarting} running={composerRunning} draft={draft} onDraft={updateDraft} onSend={() => void send()} onStop={stop} onCompact={() => void compactConversation()} onExport={() => void exportConversation()} onReloadMcp={() => void reloadSession()} attachments={attachments} onAddImages={files => void addImages(files)} onRemoveImage={id => updateAttachments(attachmentRef.current.filter(item => item.id !== id))} readingImages={readingImages} videos={videoUrls} onAddVideo={addVideoUrl} onRemoveVideo={removeVideoUrl} models={snapshot.models ?? []} model={snapshot.model} modelState={snapshot.modelState ?? "resolving"} onSelectModel={(provider, id) => void selectSessionModel(provider, id)} onSetupModel={onSettings} thinkingLevel={snapshot.thinkingLevel} thinkingLevels={snapshot.thinkingLevels ?? []} onThinkingLevel={level => void selectThinkingLevel(level)} />
           <SessionStatsBar stats={snapshot.stats} timing={timing} firstOutputMs={snapshot.firstOutput?.avgMs} />
         </div>
       </div> : !snapshot.sessionId && !activePreview && !localSubmitted ? <div role="status" className="flex min-h-0 flex-1 items-center justify-center text-sm text-muted-foreground">Opening session…</div> : <div className="flex min-h-0 flex-1"><div className="flex min-w-[520px] flex-1 flex-col">
@@ -1577,10 +1628,10 @@ export function ChatWorkspace({ path, revision = 0, newSession = true, locked = 
         <div className="relative">
           <div className="mx-auto w-full max-w-3xl">
             {banners}
-            <AgentAction thinking={liveThinking} label={turnLabel(snapshot.activeTurn, now)} running={conversationProjection.running} elapsed={elapsed} settled={settled} failure={settled === "failed" ? { details: replyError ?? undefined, action: replyRecovery } : undefined} noReply={noReply} notice={runtimeNotice} />
+            <AgentAction thinking={liveThinking} label={turnLabel(snapshot.activeTurn, now)} running={conversationProjection.running} elapsed={elapsed} settled={settled} failure={settled === "failed" ? { details: replyError ?? undefined, action: replyRecovery } : undefined} noReply={noReply} hold={hold} notice={runtimeNotice} />
           </div>
           {promptNode && <div className="absolute bottom-full left-1/2 z-20 mb-2 w-[min(48rem,calc(100vw-2rem))] -translate-x-1/2 px-3">{promptNode}</div>}
-          <Composer autoFocus={composerFocus} blocked={blocked} results={results} connected={snapshot.connected || !!activePreview} pending={snapshot.pending || (opening && !activePreview) || locked } settling={commandBusy} opening={opening && !activePreview} starting={composerStarting} unavailable={!!sessionError} running={composerRunning} draft={draft} onDraft={updateDraft} onSend={() => void send()} onStop={stop} onCompact={() => void compactConversation()} onExport={() => void exportConversation()} onReloadMcp={() => void reloadSession()} attachments={attachments} onAddImages={files => void addImages(files)} onRemoveImage={id => updateAttachments(attachmentRef.current.filter(item => item.id !== id))} readingImages={readingImages} videos={videoUrls} onAddVideo={addVideoUrl} onRemoveVideo={removeVideoUrl} models={snapshot.models ?? []} model={snapshot.model} modelState={snapshot.modelState ?? "resolving"} onSelectModel={(provider, id) => void selectSessionModel(provider, id)} onSetupModel={onSettings} thinkingLevel={snapshot.thinkingLevel} thinkingLevels={snapshot.thinkingLevels ?? []} onThinkingLevel={level => void selectThinkingLevel(level)} textguard={textguardControl} />
+          <Composer autoFocus={composerFocus} blocked={blocked} results={controlResults} connected={snapshot.connected || !!activePreview} pending={snapshot.pending || (opening && !activePreview) || locked } settling={commandBusy} opening={opening && !activePreview} starting={composerStarting} unavailable={!!sessionError} running={composerRunning} draft={draft} onDraft={updateDraft} onSend={() => void send()} onStop={stop} onCompact={() => void compactConversation()} onExport={() => void exportConversation()} onReloadMcp={() => void reloadSession()} attachments={attachments} onAddImages={files => void addImages(files)} onRemoveImage={id => updateAttachments(attachmentRef.current.filter(item => item.id !== id))} readingImages={readingImages} videos={videoUrls} onAddVideo={addVideoUrl} onRemoveVideo={removeVideoUrl} models={snapshot.models ?? []} model={snapshot.model} modelState={snapshot.modelState ?? "resolving"} onSelectModel={(provider, id) => void selectSessionModel(provider, id)} onSetupModel={onSettings} thinkingLevel={snapshot.thinkingLevel} thinkingLevels={snapshot.thinkingLevels ?? []} onThinkingLevel={level => void selectThinkingLevel(level)} textguard={textguardControl} />
         </div>
         <SessionStatsBar stats={snapshot.stats} timing={timing} firstOutputMs={snapshot.firstOutput?.avgMs} />
         </div>

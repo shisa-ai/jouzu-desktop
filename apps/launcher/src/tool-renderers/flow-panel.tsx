@@ -120,13 +120,13 @@ export function FlowMenu({ flow, widgets, statuses, reports = [], notice, error,
   const hasContent = tasks.length > 0 || flow.waits.length > 0 || reports.length > 0 || !!notice || !!error || flowWidgetEntries(widgets).length > 0 || flowStatusEntries(statuses).length > 0 || !!result;
   if (!hasContent) return null;
   return <div ref={root} className="relative flex items-center">
-    <ResultMark result={result} side="bottom" />
     <button type="button" onClick={() => setOpen(value => !value)} aria-label="Flow" aria-haspopup="dialog" aria-expanded={open} className={`flex h-7 min-w-0 max-w-56 items-center gap-1.5 rounded-md border px-2 text-xs text-muted-foreground hover:bg-muted/50 ${live ? "border-primary/40 bg-primary/5" : "border-border"}`}>
       {live ? <LoaderCircle className="size-3.5 shrink-0 animate-spin text-primary" aria-hidden="true" /> : <ListTodo className="size-3.5 shrink-0" aria-hidden="true" />}
       <span className="hidden min-w-0 flex-1 truncate sm:inline" aria-live="polite">{summary}</span>
       <span className="flex-1 sm:hidden">{tasks.length ? `${completed}/${tasks.length}` : "Flow"}</span>
       <ChevronDown className={`size-3 shrink-0 transition-transform ${open ? "rotate-180" : ""}`} aria-hidden="true" />
     </button>
+    <ResultMark result={result} side="bottom" />
     {open && <div role="dialog" aria-label="Flow details" className="absolute right-0 top-full z-40 mt-1 w-[min(22rem,calc(100vw-2rem))] overflow-hidden rounded-xl border border-border bg-popover shadow-xl">
       <div className="flex items-center gap-2 border-b border-border px-3 py-2">
         <ListTodo className="size-4 shrink-0 text-muted-foreground" />

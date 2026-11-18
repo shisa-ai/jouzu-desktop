@@ -59,7 +59,7 @@ export function SteerQueue({ items, onEdit, onRemove, onContinue, onDiscard, res
     </div>
     <ol className="mt-1 space-y-0.5">
       {items.map(item => <li key={item.clientMessageId} className="group flex items-center gap-2 rounded px-1 py-0.5 hover:bg-background/60">
-        <span className="min-w-0 flex-1 truncate" title={item.text}>{item.text}{item.images > 0 && <span className="ml-1 text-muted-foreground">· {item.images === 1 ? "1 image" : `${item.images} images`}</span>}</span>
+        <span className="min-w-0 flex-1 truncate" title={item.text}>{item.text}{item.images > 0 && <span className="ml-1 text-muted-foreground">· {fill(t.images, { n: item.images })}</span>}</span>
         {item.state === "held"
           // Flow control took it and releases it when its gate opens; /flow is where it can be changed.
           ? <span className="shrink-0 text-muted-foreground" title={t.codeMessageHeld}>{t.heldByFlow}</span>
