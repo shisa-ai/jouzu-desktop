@@ -82,12 +82,19 @@ interface Poll { records: WireObject[]; closed: boolean; error?: string }
 const RESPONSE_WATCHDOG = 5 * 60_000;
 const POLL_IDLE_MS = 30;
 const POLL_ACTIVE_MS = 5;
+// poll() and its response watchdog only start after chat_start returns, so a hung chat_start
+// would otherwise wait forever and strand the user on "Starting session…". Bound just the
+// spawn; the handshake after it (a slow cold start, a startup dialog the user is deciding) is
+// deliberately allowed to run long and is governed by the response watchdog instead.
+const STARTUP_TIMEOUT_MS = 20_000;
+const STARTUP_TIMEOUT_MESSAGE = "The session didn't start in time.";
 // A desktop connection, not an agent loop: never retries a prompt or writes history.
 export class ChatConnection {
   private handle?: string;
   private disposed = false;
   private failed = false;
   private timer?: ReturnType<typeof setTimeout>;
+  private startupTimer?: ReturnType<typeof setTimeout>;
   private polling = false;
   private replaying = false;
   private gapPending = false;
@@ -111,16 +118,28 @@ export class ChatConnection {
   isDisposed() { return this.disposed; }
   private update(change: Partial<ChatSnapshot>) { this.snapshot = { ...this.snapshot, ...change }; if (!this.disposed) for (const listener of this.subscribers) listener(this.snapshot); }
   private external = false;
+  private armStartupTimeout() {
+    this.clearStartupTimeout();
+    this.startupTimer = setTimeout(() => {
+      if (!this.disposed && !this.failed && !this.snapshot.connected) this.fail(new Error(STARTUP_TIMEOUT_MESSAGE));
+    }, STARTUP_TIMEOUT_MS);
+  }
+  private clearStartupTimeout() {
+    if (this.startupTimer) { clearTimeout(this.startupTimer); this.startupTimer = undefined; }
+  }
+
   async start(path: string, fresh = false, key = path, external = false) {
     this.external = external;
     // The runtime replays historical messages as ordinary wire events while the
     // connection attaches. Suppress those events until get_messages has supplied
     // the authoritative transcript, so opening a saved session never animates it.
     this.replaying = true;
+    this.armStartupTimeout();
     try {
       await invoke("chat_release_generation", { generation: pageGeneration });
       const handle = await invoke<string>("chat_start", { path, generation: pageGeneration, key });
-      if (this.disposed) { await invoke("chat_stop", { handle }); return; }
+      this.clearStartupTimeout();
+      if (this.disposed || this.failed) { await invoke("chat_stop", { handle }); return; }
       this.handle = handle;
       this.update({ transportReady: true });
       this.poll();
@@ -460,6 +479,7 @@ export class ChatConnection {
   private fail(error: unknown) {
     if (this.failed || this.disposed) return;
     this.failed = true;
+    this.clearStartupTimeout();
     this.update({ connected: false, transportReady: false, pending: false, error: String(error) });
     this.dialogs.clear();
     for (const request of this.requests.values()) request.reject(new Error(String(error)));
@@ -469,6 +489,7 @@ export class ChatConnection {
   }
   async close() {
     this.disposed = true;
+    this.clearStartupTimeout();
     this.dialogs.clear();
     this.snapshot = { ...this.snapshot, transportReady: false, connected: false };
     if (this.timer) clearTimeout(this.timer);

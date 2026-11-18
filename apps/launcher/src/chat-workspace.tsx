@@ -85,6 +85,10 @@ function relativeTime(updated: number) {
   if (seconds < 86400) return `${Math.floor(seconds / 3600)}h`;
   return `${Math.floor(seconds / 86400)}d`;
 }
+// A failed attach auto-recovers a highlighted session on its own, but is bounded so a genuinely
+// broken runtime cannot turn into an endless retry loop.
+const AUTO_RETRY_COOLDOWN_MS = 2000;
+const MAX_AUTO_RETRIES = 3;
 
 export function ChatWorkspace({ path, revision = 0, newSession = true, locked = false, onStartSession, onRetry, onBusyChange, onBootChange, catalogRefreshing = false, canRefreshModels = false, onModelsMissing, onRetryModels, workspaces, onSelect, onAddFolder, onRemove, onSettings, onUpdate, updateAvailable = false, updateBusy = false }: ChatWorkspaceProps) {
   const [snapshot, setSnapshot] = useState<ChatSnapshot>({ projection: emptyProjection(), connected: false, pending: false, error: null, models: [], thinkingLevels: [] });
@@ -140,6 +144,8 @@ export function ChatWorkspace({ path, revision = 0, newSession = true, locked = 
   const projectionCache = useRef(new Map<string, ChatProjection>());
   const selectedSessionRef = useRef<string | null>(null);
   selectedSessionRef.current = selectedSession;
+  const autoRetryCountRef = useRef(0);
+  const lastAutoRetryAtRef = useRef(0);
   const [dialogs, setDialogs] = useState(emptyDialogQueue);
   const queue = useRef(dialogs);
   const dialog = dialogs.items[0] ?? null;
@@ -1195,6 +1201,37 @@ export function ChatWorkspace({ path, revision = 0, newSession = true, locked = 
   // One gate: the entry session is connected before the chat UI appears, so the user
   // never sees a second, still-blocked "Connecting…" state.
   const booting = !snapshot.connected && !sessionError;
+  // The attach timed out or failed before connecting: offer a retry instead of an endless "Starting session…".
+  const attachFailed = !snapshot.connected && !!snapshot.error;
+  // The connection desynced from the runtime (a reaped/released handle). Clear the stale
+  // Rust-side handles and the pooled client, then re-attach from a clean slate — the same
+  // recovery the session-switch path already uses.
+  async function retryAttach() {
+    // Re-open the session the user was actually viewing (selected, else the one that was loaded).
+    // Re-selecting it drives the normal queuedSwitch load after the re-attach, so selection and the
+    // loaded session stay in sync and the composer doesn't wedge in "opening" with Send disabled.
+    const target = selectedKey || connection.current?.snapshot.sessionFile || null;
+    if (target) setSelectedSession(target);
+    // The connection desynced from the runtime (a reaped/released handle). Clear the stale Rust-side
+    // handles and the pooled client, then re-attach from a clean slate — the same recovery the
+    // session-switch path already uses.
+    await invoke("chat_stop_all").catch(() => {});
+    if (target) chatPool.forget(target);
+    onRetry?.();
+  }
+  // Auto-recover: when a highlighted session's connection has failed, re-attach on its own (bounded)
+  // rather than leaving the user on a dead "couldn't connect" screen.
+  useEffect(() => {
+    if (snapshot.connected) { autoRetryCountRef.current = 0; return; }
+    if (!snapshot.error) return;
+    if (!selectedSessionRef.current && !snapshot.sessionFile) return;
+    const now = Date.now();
+    if (now - lastAutoRetryAtRef.current < AUTO_RETRY_COOLDOWN_MS) return;
+    if (autoRetryCountRef.current >= MAX_AUTO_RETRIES) return;
+    lastAutoRetryAtRef.current = now;
+    autoRetryCountRef.current += 1;
+    void retryAttach();
+  }, [snapshot.connected, snapshot.error]);
   const conversationProjection = activePreview?.projection ?? snapshot.projection;
   const activeMessage = conversationProjection.activeMessage === null ? undefined : conversationProjection.messages[conversationProjection.activeMessage];
   const hasRunningTool = Object.values(conversationProjection.tools).some(tool => tool.phase === "running");
@@ -1362,7 +1399,14 @@ export function ChatWorkspace({ path, revision = 0, newSession = true, locked = 
       {snapshot.historyError && <div role="alert" className="fixed left-1/2 top-16 z-50 flex w-max max-w-[min(44rem,calc(100vw-2rem))] -translate-x-1/2 items-center gap-3 rounded-lg border border-destructive/30 bg-popover px-4 py-2 text-xs text-foreground shadow-xl"><span className="min-w-0 break-words">This session is connected, but its transcript could not be loaded. {humanizeRuntimeError(snapshot.historyError)}</span><Button variant="outline" className="h-7 shrink-0 px-2" onClick={() => void connection.current?.retryHistory()}>Retry</Button></div>}
       {capacityError && !notification && <div role="alert" className="fixed left-1/2 top-16 z-50 flex w-max max-w-[min(44rem,calc(100vw-2rem))] -translate-x-1/2 items-center gap-3 rounded-lg border border-destructive/30 bg-popover px-4 py-2 text-xs text-foreground shadow-xl"><span className="min-w-0 break-words">{humanizeRuntimeError(sessionError ?? snapshot.error ?? "")}</span><Button variant="outline" className="h-7 shrink-0 px-2" onClick={() => void startNewSession()}>New session</Button></div>}
       {flowHistoryError && !notification && <div role="alert" className="fixed left-1/2 top-16 z-50 flex w-max max-w-[min(44rem,calc(100vw-2rem))] -translate-x-1/2 items-center gap-3 rounded-lg border border-destructive/30 bg-popover px-4 py-2 text-xs text-foreground shadow-xl"><span className="min-w-0 break-words">Flow request history is full. Clear it before sending again.</span><Button variant="outline" className="h-7 shrink-0 px-2" onClick={() => void runExtensionCommand("/flow clear")}>Clear Flow history</Button></div>}
-      {booting ? <div role="status" className="flex min-h-0 flex-1 items-center justify-center text-sm text-muted-foreground">Starting session…</div> : hero ? <div className="flex min-h-0 flex-1 items-center justify-center overflow-y-auto px-4 py-8 sm:px-8">
+      {booting ? (attachFailed
+        ? <div role="alert" className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 px-6 text-center">
+          <p className="text-sm font-medium text-destructive">{humanizeRuntimeError(snapshot.error ?? "").replace(/^Error:\s*/u, "")}</p>
+          <p className="max-w-md text-sm text-muted-foreground">Your session couldn't be connected. It often clears on its own — retry, or restart the app if it keeps happening.</p>
+          {onRetry && <Button variant="outline" onClick={() => void retryAttach()}><RefreshCw className="size-4" />Retry</Button>}
+        </div>
+        : <div role="status" className="flex min-h-0 flex-1 items-center justify-center text-sm text-muted-foreground">Starting session…</div>
+      ) : hero ? <div className="flex min-h-0 flex-1 items-center justify-center overflow-y-auto px-4 py-8 sm:px-8">
         <div className="w-full max-w-3xl">
           <div className="mb-7 flex flex-col items-center gap-3 text-center">
             <span className="flex size-12 items-center justify-center rounded-2xl border border-border bg-card"><Sparkles className="size-6 text-primary" aria-hidden="true" /></span>
