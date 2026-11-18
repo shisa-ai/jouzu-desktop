@@ -102,6 +102,20 @@ describes no screens; what a person sees is in the UI document.
   each kind of operation.
 - Operations in different scopes never block each other: while the queue is
   busy, sending, Stop and model changes in sessions work as usual.
+- A request is `POST /v1/config/{kind}`. The body is checked against its kind
+  (field names, types, lengths); anything else is refused with `config-invalid`
+  and never reaches the control program, which gets only the kind's own fields.
+  The answer is `202 {operationId, position}`, never the outcome; an unknown
+  kind is `config-unknown-kind`, a full queue `config-queue-full`. A queued or
+  running operation is cancelled with `POST /v1/config/operations/{id}/cancel`.
+- `AppView.settings` is the control program's answer: read when the host starts
+  and returned by every operation. What belongs to one operation (a catalog
+  refresh's outcome, a held revision) is in that operation's
+  `lastResult[kind].params`, not in the settings. A sign-in waiting for the person shows its
+  page and code on `config.running.device`.
+- After an operation that changed configuration the host recycles its warm
+  runtime, so new sessions start with the change. Live sessions are not
+  restarted (runtime G2).
 
 ## 6. Error model
 
@@ -185,15 +199,16 @@ through the host, never from its saved file, which has none of it.
 
 | Field | Content |
 |---|---|
+| `revision` | Raised on every change; a client keeps the newest |
 | `settings` | Current settings |
 | `config` | `running`, `queued[]`, `lastResult[kind]` |
 | `startup` | State and cause |
 
 ### 7.3 Events and commands
 
-- SSE events: `session.updated` (full snapshot), `app.updated`,
-  `settings.changed`. Snapshots carry a sequence number; a client catches up by
-  sequence after reconnecting.
+- SSE events: `session.updated` (full snapshot) and `app.updated` (the whole
+  `AppView`, settings included, `GET /v1/app`). Snapshots carry a sequence
+  number; a client catches up by sequence after reconnecting.
 - Commands are HTTP. Each returns acceptance or a typed refusal synchronously;
   the resulting state is read from snapshots.
 
