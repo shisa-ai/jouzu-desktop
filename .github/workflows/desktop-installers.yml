@@ -25,6 +25,8 @@ jobs:
     if: inputs.platform == 'all' || inputs.platform == 'windows'
     runs-on: windows-latest
     timeout-minutes: 60
+    # The updater signing key lives in this environment, not in repository secrets.
+    environment: desktop-release
     defaults:
       run:
         shell: pwsh
