@@ -7,7 +7,6 @@ mod tool_script;
 mod terminal;
 mod git_environment;
 mod logs;
-mod bug_report;
 mod command_path;
 mod managed_paths;
 mod host_bootstrap;
@@ -103,62 +102,6 @@ fn diagnostics() -> Result<serde_json::Value, String> {
 fn crash_dismiss(path: String) -> Result<(), String> {
     let managed = runtime::managed_root()?;
     logs::dismiss_crash(&managed, &path)
-}
-
-#[tauri::command]
-/// Build the report draft with the payload's own reporter, and answer what the app knows about this
-/// installation when that reporter is not there.
-fn bug_report(
-    app: tauri::AppHandle,
-    description: String,
-    expected: String,
-    actual: String,
-    reproduction: String,
-) -> Result<serde_json::Value, String> {
-    Ok(
-        bug_report::draft(&app, &description, &expected, &actual, &reproduction).unwrap_or_else(|_| {
-            serde_json::json!({
-                "available": false,
-                "title": "",
-                "body": "",
-                "issueUrl": bug_report::ISSUE_NEW_URL,
-            })
-        }),
-    )
-}
-
-#[tauri::command]
-/// Open a terminal in a folder with the environment this installation manages, without starting Jouzu.
-/// The session itself is built by the script the installer carries, so the window, a terminal entry and
-/// this button describe one environment in one place.
-fn terminal_open(app: tauri::AppHandle, path: Option<String>) -> Result<(), String> {
-    // A terminal opens in the folder the app already has; without one it opens in the user's home
-    // rather than asking, because a terminal does not need a folder to be useful.
-    let folder = path
-        .filter(|value| Path::new(value).is_dir())
-        .map(std::path::PathBuf::from)
-        .or_else(|| std::env::var_os("USERPROFILE").map(std::path::PathBuf::from))
-        .ok_or("Cannot find a folder to open the terminal in.")?;
-    let root = runtime::application_root(&app)?;
-    let managed = runtime::managed_root()?;
-    let slot = active_app::resolve_app(&root, &managed)?;
-    let bash = git_environment::find(&managed)?;
-    let host = terminal::host(&root)
-        .ok_or("Windows Terminal is unavailable. Install it in Settings → System.")?;
-    let status = std::process::Command::new(crate::runtime_install::node_executable(&root))
-        .arg(root.join("runtime/desktop-tools/open-terminal.mjs"))
-        .arg(&slot)
-        .arg(&managed)
-        .arg(&host)
-        .arg(&bash)
-        .arg(runtime::effective_home()?)
-        .arg(&folder)
-        .status()
-        .map_err(|error| error.to_string())?;
-    if !status.success() {
-        return Err("The terminal could not be opened.".into());
-    }
-    Ok(())
 }
 
 #[tauri::command]
@@ -720,8 +663,6 @@ fn main() {
             diagnostics,
             crash_dismiss,
             log_event,
-            bug_report,
-            terminal_open,
             open_logs,
             open_external_url,
             command_entry_report,

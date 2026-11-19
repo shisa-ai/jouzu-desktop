@@ -12,9 +12,9 @@ its release workflows and its first-run setup use:
 | `git-environment.ps1`, `extract-portable-git.ps1`, `terminal-environment.ps1`, `command-path.ps1`, `command-entries.ps1` | Shell (embedded, written into the install on first run) | Git Bash, Windows Terminal and the `jz`/`jouzu` commands |
 | `extensions/jouzu-image/` | Shell (embedded) | The image tool extension |
 
-The remaining scripts (`open-terminal.mjs`, `bug-report.mjs`, `update-service.mjs`,
-`check-update-health.mjs` and the recipe update scripts they import) are called by the shell at
-paths the desktop install never writes. Whether to ship or remove each one is tracked separately.
+The runtime update scripts (`update-service.mjs`, `check-update-health.mjs` and the recipe scripts
+they import) belong to the runtime update channel, which stays unconfigured while the runtime is
+pinned from npm (ADR 0003); the desktop install does not carry them.
 
 ## Validation
 
