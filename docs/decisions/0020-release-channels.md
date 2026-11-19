@@ -1,6 +1,6 @@
 # 0020 — QA and stable are channels of one app
 
-Status: Implemented ([`../../packaging/launcher/RELEASE-CHANNELS.md`](../../packaging/launcher/RELEASE-CHANNELS.md)).
+Status: Implemented ([`../../packaging/desktop/RELEASE-CHANNELS.md`](../../packaging/desktop/RELEASE-CHANNELS.md)).
 Date: 2026-11-13
 
 ## Context
@@ -20,7 +20,7 @@ feed.
 - QA builds make no irreversible data-format changes.
 - `develop` is the working branch; pull requests merge into `develop`. `main` holds
   only released code. QA builds are made from `develop`.
-- Implementation: [`../../packaging/launcher/RELEASE-CHANNELS.md`](../../packaging/launcher/RELEASE-CHANNELS.md).
+- Implementation: [`../../packaging/desktop/RELEASE-CHANNELS.md`](../../packaging/desktop/RELEASE-CHANNELS.md).
 
 ## Does not mean
 

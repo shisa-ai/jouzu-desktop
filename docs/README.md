@@ -8,7 +8,7 @@
 | Who owns which state, the host contract, error slots | [`design/host-layer.md`](design/host-layer.md) |
 | What the person sees and can do | [`design/ui-layer.md`](design/ui-layer.md) |
 | How to report a problem or send a change | [`../CONTRIBUTING.md`](../CONTRIBUTING.md) |
-| How releases and channels work | [`../packaging/launcher/RELEASE-CHANNELS.md`](../packaging/launcher/RELEASE-CHANNELS.md) |
+| How releases and channels work | [`../packaging/desktop/RELEASE-CHANNELS.md`](../packaging/desktop/RELEASE-CHANNELS.md) |
 
 Rules for these documents:
 

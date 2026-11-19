@@ -16,7 +16,7 @@ and 0.2.6 packages; they behave the same in both.
   Each runtime answers for its own models over RPC (`get_state`,
   `get_available_models`, `get_available_thinking_levels`).
 - Configuration and sign-in go through Desktop's control program
-  (`packaging/launcher/control.mjs`). It imports jouzu internals today; a
+  (`packaging/desktop/control.mjs`). It imports jouzu internals today; a
   supported configuration interface is requested (G5). The control program is
   not a source of models.
 - The host uses the runtime through an adapter. Supporting another runtime built

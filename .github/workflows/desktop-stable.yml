@@ -64,12 +64,12 @@ jobs:
           if gh release view "v$CANDIDATE" --repo "$GITHUB_REPOSITORY" --json isPrerelease,body,targetCommitish > candidate.json 2>/dev/null; then
             release=candidate.json
           fi
-          version="$(node --input-type=module -e "import { stableVersionOf } from './packaging/launcher/release-guard.mjs'; console.log(stableVersionOf(process.env.CANDIDATE))")"
+          version="$(node --input-type=module -e "import { stableVersionOf } from './packaging/desktop/release-guard.mjs'; console.log(stableVersionOf(process.env.CANDIDATE))")"
           exists=-
           if gh release view "v$version" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then exists=tag-exists; fi
-          node packaging/launcher/release-guard.mjs stable "$CANDIDATE" "$GITHUB_REPOSITORY" "$release" "$exists"
+          node packaging/desktop/release-guard.mjs stable "$CANDIDATE" "$GITHUB_REPOSITORY" "$release" "$exists"
           commit="$(gh api "repos/$GITHUB_REPOSITORY/commits/v$CANDIDATE" --jq .sha)"
-          node packaging/launcher/launcher-notes.mjs CHANGELOG.md "$version" > /dev/null
+          node packaging/desktop/release-notes.mjs CHANGELOG.md "$version" > /dev/null
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "commit=$commit" >> "$GITHUB_OUTPUT"
           echo "Stable $version from v$CANDIDATE ($commit)"
@@ -91,17 +91,17 @@ jobs:
         with:
           node-version: '24.22.2'
       - name: Set the stable version
-        run: node packaging/launcher/set-version.mjs '${{ needs.prepare.outputs.version }}'
+        run: node packaging/desktop/set-version.mjs '${{ needs.prepare.outputs.version }}'
       - name: Install frontend dependencies
-        run: npm ci --prefix apps/launcher
+        run: npm ci --prefix apps/desktop
       - name: Build the UI and the release host
-        working-directory: apps/launcher
+        working-directory: apps/desktop
         run: |
           npm run build
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           npm run build:app
       - name: Build the stable installer
-        working-directory: apps/launcher
+        working-directory: apps/desktop
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
@@ -120,12 +120,12 @@ jobs:
           Copy-Item -LiteralPath $built -Destination "../../release/JouzuDesktop_${version}_x64-setup.exe"
           Copy-Item -LiteralPath "$built.sig" -Destination "../../release/JouzuDesktop_${version}_x64-setup.exe.sig"
       - name: Provision the official runtime for the exam
-        working-directory: apps/launcher/src-tauri
+        working-directory: apps/desktop/src-tauri
         run: |
           $env:JOUZU_EXAM_MANAGED = Join-Path $env:RUNNER_TEMP 'exam-runtime'
           cargo test --locked --bins provisions_the_exam_runtime -- --ignored
       - name: Install the browser test runner
-        working-directory: apps/launcher
+        working-directory: apps/desktop
         run: npx playwright install chromium
       - name: Take the exam from the release branch
         # The package is built from the candidate's commit; the exam that judges it is
@@ -135,11 +135,11 @@ jobs:
         run: |
           git fetch --no-tags --depth=1 'https://github.com/${{ github.repository }}' '${{ github.sha }}'
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          git checkout FETCH_HEAD -- apps/launcher/e2e apps/launcher/e2e-runtime
+          git checkout FETCH_HEAD -- apps/desktop/e2e apps/desktop/e2e-runtime
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           git log -1 --format='exam from %H' FETCH_HEAD
       - name: Stable exam (full playbook, real model)
-        working-directory: apps/launcher
+        working-directory: apps/desktop
         env:
           PLAYBOOK_SHISA_API_KEY: ${{ secrets.PLAYBOOK_SHISA_API_KEY }}
           PLAYBOOK_OPENROUTER_API_KEY: ${{ secrets.PLAYBOOK_OPENROUTER_API_KEY }}
@@ -180,8 +180,8 @@ jobs:
           node -e "const r=require('./release/stable-exam-windows.json'); if (!r.pass) { console.error('The stable exam did not pass'); process.exit(1) }"
           version='${{ needs.prepare.outputs.version }}'
           asset="JouzuDesktop_${version}_x64-setup.exe"
-          public_key="$(node -p "require('./apps/launcher/src-tauri/tauri.conf.json').plugins.updater.pubkey")"
-          node packaging/launcher/verify-updater-signature.mjs "release/$asset" "release/$asset.sig" "$public_key"
+          public_key="$(node -p "require('./apps/desktop/src-tauri/tauri.conf.json').plugins.updater.pubkey")"
+          node packaging/desktop/verify-updater-signature.mjs "release/$asset" "release/$asset.sig" "$public_key"
           (cd release && sha256sum "$asset" "$asset.sig" > SHA256SUMS.txt)
       - name: Notes and feed
         env:
@@ -190,9 +190,9 @@ jobs:
           QA_RESULT: ${{ inputs.qa_result }}
         run: |
           version='${{ needs.prepare.outputs.version }}'
-          node packaging/launcher/launcher-notes.mjs CHANGELOG.md "$version" > notes.md
+          node packaging/desktop/release-notes.mjs CHANGELOG.md "$version" > notes.md
           printf '\n\nQA (%s): %s\n' "$CANDIDATE" "$QA_RESULT" >> notes.md
-          node packaging/launcher/desktop-feed.mjs "$version" notes.md "$GITHUB_REPOSITORY" "JouzuDesktop_${version}_x64-setup.exe" "release/JouzuDesktop_${version}_x64-setup.exe.sig" latest.json
+          node packaging/desktop/desktop-feed.mjs "$version" notes.md "$GITHUB_REPOSITORY" "JouzuDesktop_${version}_x64-setup.exe" "release/JouzuDesktop_${version}_x64-setup.exe.sig" latest.json
           cat latest.json
       - name: Publish the stable release and replace the stable feed
         env:
@@ -209,4 +209,4 @@ jobs:
           fi
           gh release upload desktop-update latest.json --repo "$GITHUB_REPOSITORY" --clobber
       - name: Verify the stable feed is anonymously readable
-        run: node packaging/launcher/verify-feed.mjs "https://github.com/${GITHUB_REPOSITORY}/releases/download/desktop-update/latest.json" latest.json 300
+        run: node packaging/desktop/verify-feed.mjs "https://github.com/${GITHUB_REPOSITORY}/releases/download/desktop-update/latest.json" latest.json 300

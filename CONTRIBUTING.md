@@ -34,7 +34,7 @@ the app opens the issue page. Never paste API keys or other credentials.
   they judge.
 - **Follow the existing code.** Reuse the existing components and patterns.
 - **Add a test.** A fix comes with a test that fails before the change and passes after it.
-  UI specs in `apps/launcher/e2e/` run against a stubbed host; follow an existing spec.
+  UI specs in `apps/desktop/e2e/` run against a stubbed host; follow an existing spec.
 - **Write in English** for code, comments, commit messages, issues and pull requests.
 
 Changes to CI workflows, dependencies, or build and release tooling should be discussed in an
@@ -45,7 +45,7 @@ If a pull request was produced with an AI tool, please mention it in the descrip
 ## Development
 
 See [README.md](README.md#development) for how to build the app and run the tests. The CI
-checks (`launcher-checks.yml`) must pass before a pull request is merged.
+checks (`desktop-checks.yml`) must pass before a pull request is merged.
 
 ## License
 

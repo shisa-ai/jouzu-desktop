@@ -20,9 +20,9 @@ on:
     - cron: '0 21 * * *'
   pull_request:
     paths:
-      - 'apps/launcher/package-lock.json'
-      - 'apps/launcher/host/Cargo.lock'
-      - 'apps/launcher/src-tauri/Cargo.lock'
+      - 'apps/desktop/package-lock.json'
+      - 'apps/desktop/host/Cargo.lock'
+      - 'apps/desktop/src-tauri/Cargo.lock'
       - '.github/workflows/dependency-audit.yml'
 permissions:
   contents: read
@@ -45,9 +45,9 @@ jobs:
           NPM_SCOPE: ${{ inputs.npm-scope || 'all' }}
         run: |
           if [ "$NPM_SCOPE" = shipped ]; then
-            npm audit --prefix apps/launcher --omit=dev --audit-level=high
+            npm audit --prefix apps/desktop --omit=dev --audit-level=high
           else
-            npm audit --prefix apps/launcher --audit-level=high
+            npm audit --prefix apps/desktop --audit-level=high
           fi
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
@@ -57,6 +57,6 @@ jobs:
         run: |
           command -v cargo-audit >/dev/null || cargo install cargo-audit --locked
           # The repository root has no Cargo.lock: each native crate keeps its own.
-          for lock in apps/launcher/host/Cargo.lock apps/launcher/src-tauri/Cargo.lock; do
+          for lock in apps/desktop/host/Cargo.lock apps/desktop/src-tauri/Cargo.lock; do
             cargo audit --file "$lock"
           done

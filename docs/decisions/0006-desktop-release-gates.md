@@ -45,7 +45,7 @@ this ADR says so.
 
 ### Release gate — `publish: true` only
 
-6. One version, from `apps/launcher/package.json`; `Cargo.toml`/`Cargo.lock` are
+6. One version, from `apps/desktop/package.json`; `Cargo.toml`/`Cargo.lock` are
    derived from it rather than hand-checked.
 7. Notes come from the dispatch input. A `CHANGELOG.md` section is an optional
    fallback, not a requirement.

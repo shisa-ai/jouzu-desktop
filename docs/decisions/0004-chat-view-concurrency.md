@@ -16,7 +16,7 @@ opening, or running another. Most people use one or two sessions; five is the
 warm baseline; 30 is the regression floor that must never be reduced to one.
 
 The desktop does not do that today. `chat_start` stops every previous chat
-runtime before spawning a new one (`apps/launcher/src-tauri/src/chat.rs`), and
+runtime before spawning a new one (`apps/desktop/src-tauri/src/chat.rs`), and
 the view's New session action refuses while the current turn runs
 (`chat-workspace.tsx`, "Wait for the current turn to finish before starting a new
 session."). One window owns exactly one runtime.

@@ -34,12 +34,12 @@ for development.
   runtime prompts into approvals and questions, restarts a runtime that dies, and keeps a few
   runtimes warm for recently used folders so opening a session does not wait for one to start.
   Because the host is separate from the UI, the UI can be replaced without touching sessions.
-  See [`apps/launcher/host/README.md`](apps/launcher/host/README.md).
+  See [`apps/desktop/host/README.md`](apps/desktop/host/README.md).
 - **Jouzu runtime.** The agent itself, installed on first run from the official `jouzu` npm
   package together with a pinned Node.js. The desktop installer carries the app only; the
   runtime updates separately. It runs with Jouzu's own home (see below), not a Desktop
   folder. The host talks to it through an adapter, so the runtime is replaceable.
-- **Shell.** The Tauri app (`apps/launcher/src-tauri`) starts the host, opens the window,
+- **Shell.** The Tauri app (`apps/desktop/src-tauri`) starts the host, opens the window,
   provisions the runtime and applies app updates. A release shell runs only the host built
   with it, so an install never mixes builds.
 
@@ -67,7 +67,7 @@ builds.
 QA packages are release candidates (`X.Y.Z-rc.N`) and carry the Jouzu icon with a **QA**
 badge. A stable release `X.Y.Z` is built again from the QA-tested commit with the normal icon,
 must pass the full user playbook with a real model, and is signed. Details are in
-[`packaging/launcher/RELEASE-CHANNELS.md`](packaging/launcher/RELEASE-CHANNELS.md).
+[`packaging/desktop/RELEASE-CHANNELS.md`](packaging/desktop/RELEASE-CHANNELS.md).
 
 ## Web access
 
@@ -110,14 +110,14 @@ Everything is in one Desktop folder. Jouzu's own data is the `data` folder insid
 ## Repository layout
 
 ```text
-apps/launcher/              the desktop app
+apps/desktop/              the desktop app
   src/                      React UI
   src-tauri/                Tauri shell (Rust)
   host/                     jouzu-host (Rust)
   e2e/                      Playwright specs and the user playbook
   e2e-runtime/              acceptance scripts against a real Jouzu runtime
   scripts/                  build and development helpers
-packaging/launcher/         installer, update feed and release tooling
+packaging/desktop/         installer, update feed and release tooling
 scripts/                    repository test runner used by CI
 .github/workflows/          development and release gates
 CHANGELOG.md                user-facing changes per release
@@ -129,19 +129,19 @@ Requirements: Node.js 24, Rust (stable), and the
 [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/) for your platform.
 
 ```bash
-cd apps/launcher
+cd apps/desktop
 npm ci
 npm run dev:isolated   # run the app with its own data folder, never your real one
 ```
 
 `dev:isolated` keeps everything, including the Jouzu home, under a separate `JouzuDesktopDev`
-folder (override with `JOUZU_LAUNCHER_DEV_HOME`), so a development run cannot touch an
+folder (override with `JOUZU_DESKTOP_DEV_HOME`), so a development run cannot touch an
 installed app or your real Jouzu sessions.
 
 ### Tests
 
 ```bash
-cd apps/launcher
+cd apps/desktop
 npm test                      # UI unit tests (Vitest)
 npm run build                 # typecheck and production UI build
 npm run test:e2e              # Playwright specs against a stubbed host
@@ -149,18 +149,18 @@ cargo test --manifest-path host/Cargo.toml
 cd src-tauri && cargo test --locked --bins
 
 # from the repository root: packaging and release tooling tests
-npm run test:node -- packaging/launcher/*.test.mjs
+npm run test:node -- packaging/desktop/*.test.mjs
 ```
 
 Acceptance against a real, released Jouzu runtime is opt-in and never runs against a paid
-provider: see [`apps/launcher/e2e-runtime/README.md`](apps/launcher/e2e-runtime/README.md).
+provider: see [`apps/desktop/e2e-runtime/README.md`](apps/desktop/e2e-runtime/README.md).
 The user playbook (`npm run playbook`) drives the running app through accessible controls
 only, the way a user would, and records timing for each scenario.
 
 ### Building an installer
 
 ```bash
-cd apps/launcher
+cd apps/desktop
 npm run tauri build
 ```
 
@@ -169,7 +169,7 @@ both with one build id.
 
 ## Continuous integration
 
-- **Development gate** (`launcher-checks.yml`, every pull request): debug build, unit tests,
+- **Development gate** (`desktop-checks.yml`, every pull request): debug build, unit tests,
   host and shell tests, mocked UI specs. Kept fast.
 - **Release gate** (`desktop-release.yml`, `desktop-stable.yml`, `dependency-audit.yml`):
   QA release candidates with the QA icon and their feed; stable builds rebuilt from a QA
@@ -190,4 +190,4 @@ gets a fix, the fix names the root cause, and every closed issue gets a regressi
 ## License
 
 Apache-2.0. Bundled third-party components are listed in
-[`packaging/launcher/NOTICES.md`](packaging/launcher/NOTICES.md).
+[`packaging/desktop/NOTICES.md`](packaging/desktop/NOTICES.md).

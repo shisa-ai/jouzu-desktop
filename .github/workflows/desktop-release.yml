@@ -1,8 +1,7 @@
 name: Desktop release
 
 # Jouzu Desktop is its own product: a Tauri shell plus the chat UI and its
-# installer. It is not the launcher that ships Jouzu, and these gates are the
-# desktop's own (ADR 0006), not the launcher's.
+# installer. These gates are the desktop's own (ADR 0006).
 #
 # Build gate: typecheck, unit tests, chat/session acceptance tests, native tests,
 # and an unsigned NSIS build. Signing and the feed are release steps only.
@@ -23,7 +22,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Version to release; must match apps/launcher/package.json
+        description: Version to release; must match apps/desktop/package.json
         required: true
         type: string
         default: '1.0.11'
@@ -65,9 +64,9 @@ jobs:
         env:
           INPUT_VERSION: ${{ inputs.version }}
         run: |
-          version="$(node -p "require('./apps/launcher/package.json').version")"
+          version="$(node -p "require('./apps/desktop/package.json').version")"
           if [ "$version" != "$INPUT_VERSION" ]; then
-            echo "::error::Input version $INPUT_VERSION does not match apps/launcher/package.json ($version)"
+            echo "::error::Input version $INPUT_VERSION does not match apps/desktop/package.json ($version)"
             exit 1
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
@@ -80,7 +79,7 @@ jobs:
           # The QA release and its feed entry describe what changed: the notes input, or the
           # CHANGELOG section for this exact version. Checked before the build, not after it.
           if [ -z "$INPUT_NOTES" ]; then
-            node packaging/launcher/launcher-notes.mjs CHANGELOG.md '${{ steps.check.outputs.version }}' > /dev/null
+            node packaging/desktop/release-notes.mjs CHANGELOG.md '${{ steps.check.outputs.version }}' > /dev/null
           fi
       - name: Refuse a version that is not newer than both feeds
         if: ${{ inputs.publish }}
@@ -91,7 +90,7 @@ jobs:
           version='${{ steps.check.outputs.version }}'
           exists=-
           if gh release view "v$version" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then exists=tag-exists; fi
-          node packaging/launcher/release-guard.mjs qa "$version" "$GITHUB_REPOSITORY" "$exists"
+          node packaging/desktop/release-guard.mjs qa "$version" "$GITHUB_REPOSITORY" "$exists"
 
   audit:
     uses: ./.github/workflows/dependency-audit.yml
@@ -116,17 +115,17 @@ jobs:
         with:
           node-version: '24.22.2'
       - name: Install frontend dependencies
-        run: npm ci --prefix apps/launcher
+        run: npm ci --prefix apps/desktop
       - name: Frontend build and unit tests
         run: |
-          npm --prefix apps/launcher run build
+          npm --prefix apps/desktop run build
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          npm --prefix apps/launcher test
+          npm --prefix apps/desktop test
       - name: Install the browser test runner
-        working-directory: apps/launcher
+        working-directory: apps/desktop
         run: npx playwright install chromium
       - name: Mocked UI tests
-        working-directory: apps/launcher
+        working-directory: apps/desktop
         run: |
           $vite = Start-Process node -ArgumentList 'node_modules/vite/bin/vite.js' -PassThru -NoNewWindow
           try {
@@ -140,17 +139,17 @@ jobs:
           } finally { if (-not $vite.HasExited) { Stop-Process -Id $vite.Id } }
           exit $code
       - name: Release host build and tests
-        working-directory: apps/launcher
+        working-directory: apps/desktop
         run: |
           # build:app builds the release host and stages it where the shell bundles it from.
           npm run build:app
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           cargo test --locked --manifest-path host/Cargo.toml
       - name: Native tests
-        working-directory: apps/launcher/src-tauri
+        working-directory: apps/desktop/src-tauri
         run: cargo test --locked --bins
       - name: Provision the runtime without a system Node
-        working-directory: apps/launcher/src-tauri
+        working-directory: apps/desktop/src-tauri
         shell: pwsh
         run: |
           # npm lifecycle scripts invoke `node` by name. Remove every Node directory
@@ -163,7 +162,7 @@ jobs:
           if (Get-Command node -ErrorAction SilentlyContinue) { throw 'Node is still on PATH; this gate would not prove the fix.' }
           cargo test --locked --bins installs_the_official_runtime -- --ignored
       - name: Build the installer
-        working-directory: apps/launcher
+        working-directory: apps/desktop
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
@@ -187,7 +186,7 @@ jobs:
           npx tauri build --bundles nsis --config $overlay
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Name and verify the installer
-        working-directory: apps/launcher
+        working-directory: apps/desktop
         run: |
           $version = '${{ needs.prepare.outputs.version }}'
           $directory = 'src-tauri/target/release/bundle/nsis'
@@ -199,7 +198,7 @@ jobs:
             if (-not (Test-Path -LiteralPath "$built.sig")) { throw 'The updater signature was not produced' }
             Copy-Item -LiteralPath "$built.sig" -Destination "$asset.sig" -Force
             $publicKey = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).plugins.updater.pubkey
-            node ../../packaging/launcher/verify-updater-signature.mjs $asset "$asset.sig" $publicKey
+            node ../../packaging/desktop/verify-updater-signature.mjs $asset "$asset.sig" $publicKey
             if ($LASTEXITCODE) { exit $LASTEXITCODE }
           }
           "$((Get-FileHash -LiteralPath $asset -Algorithm SHA256).Hash.ToLower())  JouzuDesktop_${version}_x64-setup.exe" |
@@ -208,9 +207,9 @@ jobs:
         run: |
           $stage = Join-Path $env:RUNNER_TEMP 'release'
           New-Item -ItemType Directory $stage -Force | Out-Null
-          Get-ChildItem apps/launcher/src-tauri/target/release/bundle/nsis -Filter 'JouzuDesktop_*' |
+          Get-ChildItem apps/desktop/src-tauri/target/release/bundle/nsis -Filter 'JouzuDesktop_*' |
             Copy-Item -Destination $stage
-          Copy-Item apps/launcher/SHA256SUMS.txt $stage
+          Copy-Item apps/desktop/SHA256SUMS.txt $stage
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: windows-release
@@ -238,7 +237,7 @@ jobs:
         shell: bash
         run: |
           node - <<'NODE'
-          const updater = require('./apps/launcher/src-tauri/tauri.conf.json').plugins?.updater;
+          const updater = require('./apps/desktop/src-tauri/tauri.conf.json').plugins?.updater;
           if (!updater?.pubkey) throw new Error('The updater public key is not configured');
           const endpoint = String(updater.endpoints?.[0] ?? '');
           if (!/^https:\/\/github\.com\/[^/]+\/[^/]+\/releases\/download\/desktop-update\/latest\.json$/.test(endpoint)) {
@@ -258,9 +257,9 @@ jobs:
           if [ -n "$INPUT_NOTES" ]; then
             printf '%s\n' "$INPUT_NOTES" > notes.md
           else
-            node packaging/launcher/launcher-notes.mjs CHANGELOG.md "$version" > notes.md
+            node packaging/desktop/release-notes.mjs CHANGELOG.md "$version" > notes.md
           fi
-          node packaging/launcher/desktop-feed.mjs "$version" notes.md "$GITHUB_REPOSITORY" "$asset" "release/$asset.sig" latest.json
+          node packaging/desktop/desktop-feed.mjs "$version" notes.md "$GITHUB_REPOSITORY" "$asset" "release/$asset.sig" latest.json
           cat latest.json
       - name: Check the feeds again before writing
         env:
@@ -269,7 +268,7 @@ jobs:
           version='${{ needs.prepare.outputs.version }}'
           exists=-
           if gh release view "v$version" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then exists=tag-exists; fi
-          node packaging/launcher/release-guard.mjs qa "$version" "$GITHUB_REPOSITORY" "$exists"
+          node packaging/desktop/release-guard.mjs qa "$version" "$GITHUB_REPOSITORY" "$exists"
       - name: Publish the QA prerelease
         env:
           GH_TOKEN: ${{ github.token }}
@@ -296,7 +295,7 @@ jobs:
         # The release CDN can answer 404 or the previous feed for a while after the
         # upload; verify-feed.mjs retries until the published feed is served (#81).
         run: |
-          node packaging/launcher/verify-feed.mjs "https://github.com/${GITHUB_REPOSITORY}/releases/download/desktop-update-qa/latest.json" latest.json 300
+          node packaging/desktop/verify-feed.mjs "https://github.com/${GITHUB_REPOSITORY}/releases/download/desktop-update-qa/latest.json" latest.json 300
 
 
 

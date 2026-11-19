@@ -15,7 +15,7 @@ URLs, and file paths for artifacts the turn produced.
 
 Today the webview calls `openUrl` from `@tauri-apps/plugin-opener` directly
 (`chat-markdown.tsx`, `App.tsx`, `report.ts`). The capability
-(`apps/launcher/src-tauri/capabilities/default.json`) allows exactly two URL
+(`apps/desktop/src-tauri/capabilities/default.json`) allows exactly two URL
 patterns:
 
 ```text

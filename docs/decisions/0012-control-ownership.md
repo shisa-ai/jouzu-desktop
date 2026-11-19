@@ -17,7 +17,7 @@ Status: Partly implemented, partly superseded.
 
 ## Context
 
-The shell used to run `packaging/launcher/control.mjs` itself and stream device codes to
+The shell used to run `packaging/desktop/control.mjs` itself and stream device codes to
 the UI over a Tauri event. Phase C moves control to the host, so the shell must not
 execute the adapter and the UI must not call a Tauri control command.
 
@@ -63,7 +63,7 @@ Both paths must never be reachable at the same time.
 ### D7 — Development uses the production chain
 
 `tauri dev` also spawns the host and loads its origin; assets are served from
-`apps/launcher/dist` (`vite build --watch`). There is one contract in every
+`apps/desktop/dist` (`vite build --watch`). There is one contract in every
 environment; only the asset source is a build artefact. An HMR proxy, if wanted, is a
 CP6 concern.
 
@@ -132,7 +132,7 @@ Related risks for you to weigh, not decisions taken here:
 Automated, on this branch:
 
 ```text
-cargo test (apps/launcher/host)         50 unit tests, real parser and resolver
+cargo test (apps/desktop/host)         50 unit tests, real parser and resolver
 cargo test --test control              3 tests against the REAL adapter + real Node
   JOUZU_HOST_TEST_APP=<installed app>  required; without it the tests skip and say so
   JOUZU_HOST_TEST_HOME=<real home>     optional; real data instead of an empty temp home

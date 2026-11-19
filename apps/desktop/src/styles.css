@@ -1,0 +1,101 @@
+@import "tailwindcss";
+/* The sources are the page and the interface, named rather than discovered, so a compile never walks a
+   directory that holds none of this project's markup. */
+@source "../index.html";
+@source "./**/*.{ts,tsx}";
+@theme {
+  --color-card: #18191f;
+  --color-card-foreground: #eeeeF2;
+  --color-popover: #18191f;
+  --color-popover-foreground: #eeeeF2;
+  --color-accent: #2b2536;
+  --color-accent-foreground: #eeeeF2;
+  --color-input: #303039;
+  --color-destructive: #f87171;
+  --color-background: #121318;
+  --color-foreground: #eeeeF2;
+  --color-primary: #39c8e8;
+  --color-primary-foreground: #101318;
+  --color-muted: #202127;
+  --color-muted-foreground: #a5a2b2;
+  --color-border: #303039;
+  --color-ring: #ae92c9;
+}
+@layer base {
+  html, body, #root { height: 100%; overflow: hidden; }
+  body { color-scheme: dark; @apply m-0 bg-background text-foreground antialiased; font-family: system-ui, sans-serif; overscroll-behavior: none; }
+  button { cursor: pointer; }
+  button:disabled { cursor: default; }
+  /* Thin, quiet scrollbars: the native Windows track is too wide for the conversation rail. */
+  * { scrollbar-width: thin; scrollbar-color: #4b4b57 transparent; }
+  *::-webkit-scrollbar { width: 8px; height: 8px; }
+  *::-webkit-scrollbar-track { background: transparent; }
+  *::-webkit-scrollbar-thumb { border: 2px solid transparent; border-radius: 999px; background: #4b4b57; background-clip: padding-box; }
+  *::-webkit-scrollbar-thumb:hover { background: #6a6a78; background-clip: padding-box; }
+  /* The window is a native shell: only inputs and explicitly marked content are selectable. */
+  #root { height: 100%; overflow: hidden; user-select: none; -webkit-user-select: none; }
+  input, textarea, [contenteditable="true"], .select-text { user-select: text; -webkit-user-select: text; }
+  img { -webkit-user-drag: none; }
+}
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition: none !important; } }
+
+/* The app's dotted sign, animated: cyan dots on the left, purple on the right, the same palette as the JZ icon.
+   A bump travels along the row, the way a message moves through the mark, so a wait reads as motion rather than a static ring. */
+@keyframes jouzu-dot-travel {
+  0%, 60%, 100% { transform: translateY(0) scale(0.7); opacity: 0.4; }
+  30% { transform: translateY(-0.45rem) scale(1); opacity: 1; }
+}
+.jouzu-loader { display: inline-flex; align-items: center; gap: 0.5rem; height: 1.6rem; }
+.jouzu-loader span { display: block; width: 0.6rem; height: 0.6rem; border-radius: 9999px; animation: jouzu-dot-travel 1.2s ease-in-out infinite; }
+.jouzu-loader span:nth-child(1) { background: #22d3ee; animation-delay: 0s; }
+.jouzu-loader span:nth-child(2) { background: #39c8e8; animation-delay: 0.15s; }
+.jouzu-loader span:nth-child(3) { background: #ae92c9; animation-delay: 0.3s; }
+.jouzu-loader span:nth-child(4) { background: #c588c2; animation-delay: 0.45s; }
+.jouzu-loader-sm { height: 1rem; gap: 0.25rem; }
+.jouzu-loader-sm span { width: 0.35rem; height: 0.35rem; }
+@media (prefers-reduced-motion: reduce) {
+  .jouzu-loader span { animation: none; opacity: 1; transform: none; }
+  .jouzu-loader span:nth-child(2), .jouzu-loader span:nth-child(4) { opacity: 0.5; }
+}
+
+@keyframes jouzu-glow {
+  0%, 100% { transform: translate3d(0, 0, 0) scale(1); }
+  50% { transform: translate3d(0, 12px, 0) scale(1.07); }
+}
+
+
+.onboarding-card button.bg-primary {
+  background-color: transparent;
+  background-image: linear-gradient(100deg, #2f93a8 0%, #4a7fae 100%);
+  color: #f4f8fb;
+  box-shadow: 0 12px 30px -16px rgba(57, 200, 232, 0.55);
+}
+.onboarding-card button.bg-primary:hover { filter: brightness(1.08); }
+
+
+
+/* Light theme keeps the JZ mark unchanged and stays off pure white: a warm lavender paper with
+   cyan and violet accents from the logo. */
+.light {
+  --color-card: #fbf8fd;
+  --color-card-foreground: #211a27;
+  --color-popover: #fbf8fd;
+  --color-popover-foreground: #211a27;
+  --color-accent: #ece2f4;
+  --color-accent-foreground: #241a2e;
+  --color-input: #e3dbea;
+  --color-destructive: #b42318;
+  --color-background: #f3eef7;
+  --color-foreground: #211a27;
+  --color-primary: #0b8fa8;
+  --color-primary-foreground: #ffffff;
+  --color-muted: #eae3f0;
+  --color-muted-foreground: #665b70;
+  --color-border: #d8cee0;
+  --color-ring: #8b6aa8;
+  color-scheme: light;
+}
+.light body { color-scheme: light; }
+.light * { scrollbar-color: #b9aac7 transparent; }
+.light *::-webkit-scrollbar-thumb { background: #b9aac7; background-clip: padding-box; }
+.light *::-webkit-scrollbar-thumb:hover { background: #9e8bb0; background-clip: padding-box; }

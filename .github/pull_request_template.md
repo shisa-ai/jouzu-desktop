@@ -18,4 +18,4 @@ Fixes #
 
 - [ ] Base branch is `develop`
 - [ ] A test covers the change
-- [ ] `npm test` and `npm run build` pass in `apps/launcher`
+- [ ] `npm test` and `npm run build` pass in `apps/desktop`
