@@ -43,14 +43,6 @@ struct ShellState {
     bundled_git: bool,
     recent: Vec<Workspace>,
 }
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct LegacyPreference {
-    schema_version: u32,
-    remember: bool,
-    folder: String,
-}
-
 fn platform() -> &'static str {
     if cfg!(target_os = "windows") {
         "windows"
@@ -59,33 +51,6 @@ fn platform() -> &'static str {
     } else {
         "linux"
     }
-}
-
-fn legacy_workspace(content: &str) -> Result<Option<Workspace>, String> {
-    let preference: LegacyPreference = serde_json::from_str(content.trim_start_matches('\u{feff}'))
-        .map_err(|error| format!("Cannot read remembered folder: {error}"))?;
-    if preference.schema_version != 1 {
-        return Err("Unsupported folder preference version".into());
-    }
-    if !preference.remember || preference.folder.is_empty() {
-        return Ok(None);
-    }
-    Ok(Some(Workspace {
-        id: format!("windows:{}", preference.folder),
-        path: preference.folder,
-        environment: Environment {
-            kind: "windows".into(),
-        },
-    }))
-}
-
-fn read_legacy(path: &Path) -> Result<Vec<Workspace>, String> {
-    let content = match std::fs::read_to_string(path) {
-        Ok(content) => content,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
-        Err(error) => return Err(format!("Cannot read folder preferences: {error}")),
-    };
-    Ok(legacy_workspace(&content)?.into_iter().collect())
 }
 
 #[tauri::command]
@@ -181,21 +146,11 @@ fn default_workspace_path() -> Result<std::path::PathBuf, String> {
 #[tauri::command]
 fn shell_state(app: tauri::AppHandle) -> Result<ShellState, String> {
     let history = runtime::managed_root()?.join("recent.json");
-    let recent = if cfg!(target_os = "windows") {
-        match std::env::var_os("LOCALAPPDATA") {
-            Some(root) => {
-                read_legacy(&Path::new(&root).join("JouzuDesktop").join("launcher.json"))?
-            }
-            None => vec![],
-        }
-    } else {
-        vec![]
-    };
     let mut recent: Vec<Workspace> = if history.exists() {
         serde_json::from_slice(&std::fs::read(&history).map_err(|e| e.to_string())?)
             .map_err(|e| format!("Cannot read history: {e}"))?
     } else {
-        recent
+        vec![]
     };
     recent.retain(|workspace| Path::new(&workspace.path).is_dir());
     if recent.is_empty() {
@@ -700,26 +655,6 @@ fn show_main(app: &tauri::AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn imports_remembered_folder() {
-        let w = legacy_workspace(r#"{"schemaVersion":1,"remember":true,"folder":"project"}"#)
-            .unwrap()
-            .unwrap();
-        assert_eq!(w.path, "project");
-    }
-    #[test]
-    fn respects_forgetting() {
-        assert!(
-            legacy_workspace(r#"{"schemaVersion":1,"remember":false,"folder":"old"}"#)
-                .unwrap()
-                .is_none()
-        );
-    }
-    #[test]
-    fn rejects_invalid_preferences() {
-        assert!(legacy_workspace("not json").is_err());
-        assert!(legacy_workspace(r#"{"schemaVersion":2,"remember":true,"folder":"x"}"#).is_err());
-    }
     #[test]
     fn external_links_allow_any_http_host() {
         assert!(external_http_url("http://localhost:8100").is_ok());
