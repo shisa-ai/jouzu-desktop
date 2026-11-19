@@ -31,6 +31,7 @@ Records 0001–0012 come from the former planning repository (migrated 2026-11-1
 | [0021](0021-web-and-remote-are-one-client.md) | Web and remote are one client | Accepted; not implemented |
 | [0022](0022-independent-qa.md) | QA is independent of development | Accepted; not set up |
 | [0023](0023-problems-fixed-at-the-root.md) | Problems are recorded, then fixed at the root | Accepted |
+| [0024](0024-no-launcher.md) | Desktop has no launcher | Accepted |
 
 ## Adding a record
 
