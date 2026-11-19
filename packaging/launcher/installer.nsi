@@ -102,11 +102,6 @@ VIAddVersionKey "ProductVersion" "${VERSION}"
 # additional plugins
 !addplugindir "${ADDITIONALPLUGINSPATH}"
 
-; The launcher-only package is selected by the generated template; an unset value is a real no-op.
-!ifndef JOUZU_LAUNCHER_ONLY
-!define JOUZU_LAUNCHER_ONLY 0
-!endif
-
 ; The bundler supplies the uninstaller signing command it derived from the configured signCommand.
 !if "${UNINSTALLERSIGNCOMMAND}" != ""
   !uninstfinalize '${UNINSTALLERSIGNCOMMAND}' = 0
