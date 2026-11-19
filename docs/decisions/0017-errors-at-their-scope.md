@@ -1,6 +1,6 @@
 # 0017 — Errors are shown at their own scope
 
-Status: Accepted
+Status: Accepted; implemented in 1.1.3-rc.3. Remaining cases are tracked as issues.
 Date: 2026-11-16
 
 ## Context

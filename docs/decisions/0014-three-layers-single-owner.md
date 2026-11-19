@@ -1,6 +1,7 @@
 # 0014 — Three layers, one owner per piece of state
 
-Status: Accepted
+Status: Accepted. Remaining duplicates are listed in
+[`../design/host-layer.md`](../design/host-layer.md) §8 and [`../design/ui-layer.md`](../design/ui-layer.md) §10.
 Date: 2026-11-17
 
 ## Context

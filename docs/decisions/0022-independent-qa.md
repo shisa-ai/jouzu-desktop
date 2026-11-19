@@ -1,6 +1,6 @@
 # 0022 — QA is independent of development
 
-Status: Accepted
+Status: Accepted; not set up yet.
 Date: 2026-11-19
 
 ## Context

@@ -1,6 +1,7 @@
 # 0019 — Development checks are fast; release checks judge the installed product
 
-Status: Accepted
+Status: Accepted. The development and release split is in CI; release checks on the installed
+package are run by hand and are not yet automated for stable releases.
 Date: 2026-11-15 (user-visible timing 2026-11-18, error paths 2026-11-18)
 
 ## Context

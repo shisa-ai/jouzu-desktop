@@ -4,8 +4,14 @@
 > this note and the status line. Links to `spec/`, `contracts/` and `tasks/` point to
 > drafts that were not migrated; the current design is in [`../design/`](../design/).
 
-Status: Partly superseded. D12 (new sessions deferred) is replaced by [0016](0016-new-session-ready-at-once.md);
-D14/D20 (model list from the control adapter) by [0015](0015-runtime-facts-relayed-not-reinterpreted.md). The rest is implemented.
+Status: Partly superseded, partly implemented.
+- D12 (new sessions deferred) is replaced by [0016](0016-new-session-ready-at-once.md);
+  D14/D20 (model list from the control adapter) by [0015](0015-runtime-facts-relayed-not-reinterpreted.md).
+- Implemented: D13 normalized history, D15 serialized control, D16 bounded pending handles,
+  D17 `SessionStore`.
+- D18 in part: the raw command proxy is gone; `runtime.event` is still published on the
+  event stream.
+- D19 was a one-time checkpoint.
 Date: 2026-11-03
 Updated: 2026-11-12 — the branch now has a chat path through raw runtime commands;
 current state in `tasks/0096-phase-c-cp0-audit.md`

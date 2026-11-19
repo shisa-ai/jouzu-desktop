@@ -4,7 +4,8 @@
 > this note and the status line. Links to `spec/`, `contracts/` and `tasks/` point to
 > drafts that were not migrated; the current design is in [`../design/`](../design/).
 
-Status: Accepted  
+Status: Accepted. The runtime is now installed from npm on first run at a pinned,
+verified version; the provisioning gap named below is closed.
 Date: 2026-10-23
 
 ## Context

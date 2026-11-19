@@ -4,9 +4,14 @@
 > this note and the status line. Links to `spec/`, `contracts/` and `tasks/` point to
 > drafts that were not migrated; the current design is in [`../design/`](../design/).
 
-Status: Implemented (host `/v1/control`, configuration queue in
-[`../design/host-layer.md`](../design/host-layer.md) §5). D5 (models from `status.models`) is superseded by
-[0015](0015-runtime-facts-relayed-not-reinterpreted.md).
+Status: Partly implemented, partly superseded.
+- Implemented: D1–D4 (host `/v1/control`, job ownership, cancel and timeout), D8 (embedded
+  `control.mjs` with `--eval`). Operations are now queued instead of refused ([`../design/host-layer.md`](../design/host-layer.md) §5).
+- D5 (models from `status.models`) is superseded by
+  [0015](0015-runtime-facts-relayed-not-reinterpreted.md).
+- D6 in part: the UI no longer calls the shell for configuration, but the shell still
+  registers the unused `model_catalog` and `image_models` commands.
+- D7 (development uses the production chain) has not been re-checked.
 - Date: 2026-11-10
 - Related: `docs/tasks/0086-phase-c.md` CP1, `docs/spec/03-host.md` §5, `docs/contracts/host-ui-v1.md` §4
 

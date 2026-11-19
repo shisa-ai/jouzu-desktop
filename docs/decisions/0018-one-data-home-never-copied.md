@@ -1,6 +1,6 @@
 # 0018 — One data home, never copied
 
-Status: Accepted
+Status: Implemented in 1.1.3-rc.2.
 Date: 2026-11-16
 
 ## Context

@@ -1,6 +1,7 @@
 # 0016 — A new session is ready at once
 
-Status: Accepted
+Status: Accepted. Not met by 1.1.3-rc.3 (Send waits for the runtime); the fix is in progress
+for 1.1.4.
 Date: 2026-11-18 (warm pool 2026-11-14)
 
 ## Context

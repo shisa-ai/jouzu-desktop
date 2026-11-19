@@ -1,6 +1,6 @@
 # 0020 — QA and stable are channels of one app
 
-Status: Accepted
+Status: Implemented ([`../../packaging/launcher/RELEASE-CHANNELS.md`](../../packaging/launcher/RELEASE-CHANNELS.md)).
 Date: 2026-11-13
 
 ## Context

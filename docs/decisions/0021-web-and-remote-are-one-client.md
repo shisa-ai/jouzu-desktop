@@ -1,6 +1,6 @@
 # 0021 — Web and remote are one client
 
-Status: Accepted
+Status: Accepted; not implemented yet (`WebApi` and `RemoteApi` are still separate classes).
 Date: 2026-11-14
 
 ## Context

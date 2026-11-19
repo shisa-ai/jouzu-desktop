@@ -4,7 +4,8 @@
 > this note and the status line. Links to `spec/`, `contracts/` and `tasks/` point to
 > drafts that were not migrated; the current design is in [`../design/`](../design/).
 
-Status: Accepted
+Status: Implemented (Settings → Web access: loopback, LAN and Tailscale scopes with pairing;
+public scope still refused). Amended by [0021](0021-web-and-remote-are-one-client.md).
 Date: 2026-10-30
 Related: ADR 0007, ADR 0009, ADR 0010, `spec/03-host.md`,
 `tasks/0085-remote-access.md`

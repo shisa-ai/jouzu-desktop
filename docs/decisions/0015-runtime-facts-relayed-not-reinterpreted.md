@@ -1,6 +1,7 @@
 # 0015 — Runtime facts are relayed, not reinterpreted
 
-Status: Accepted
+Status: Accepted. Not yet met on `develop` (1.1.3-rc.3): the host keeps no cached answer and
+live sessions are not reloaded after a configuration change; the fix is in progress for 1.1.4.
 Date: 2026-11-17 (caching clarified 2026-11-18)
 
 ## Context
