@@ -59,7 +59,7 @@ export function catalogChangeSummary(changes: unknown): string {
   return parts.join(" ");
 }
 export function parseControlState(value: unknown): ControlState {
-  const fail = () => { throw new Error("Configuration service response is incompatible. Restart the development launcher and retry."); };
+  const fail = () => { throw new Error("Configuration service response is incompatible. Restart the development build and retry."); };
   if (!record(value)) return fail();
   if (value.schemaVersion !== 1 || !record(value.account) || typeof value.account.signedIn !== "boolean" || !(value.profile === null || typeof value.profile === "string")) return fail();
   if (value.account.revocation !== undefined && !["confirmed", "unconfirmed", "not-linked"].includes(value.account.revocation as string)) return fail();

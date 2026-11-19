@@ -4,7 +4,7 @@ pub fn restore_bundled(root: &Path, managed: &Path) -> Result<(), String> {
     let _lease = crate::update_lock::lock(managed, true)?;
     let updates = managed.join("updates");
     if updates.join("operation.lock").exists() {
-        return Err("An update is active or interrupted. Restart the launcher and retry after the update process exits.".into());
+        return Err("An update is active or interrupted. Restart Jouzu Desktop and retry after the update process exits.".into());
     }
     let app = root.join("app");
     let metadata: serde_json::Value = serde_json::from_slice(

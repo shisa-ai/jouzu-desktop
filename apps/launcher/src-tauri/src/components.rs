@@ -135,7 +135,7 @@ impl Release {
         let current =
             semver::Version::parse(launcher_version).map_err(|_| "Invalid launcher version")?;
         if current < minimum {
-            return Err("Update the launcher before installing this release".into());
+            return Err("Update Jouzu Desktop before installing this release".into());
         }
         if self.components.is_empty() || self.components.len() > 3 {
             return Err("Invalid component count".into());

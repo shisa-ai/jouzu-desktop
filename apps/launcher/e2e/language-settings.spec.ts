@@ -59,7 +59,7 @@ test('a display language saved on the Jouzu side is adopted; a per-field mix is 
   const requests: any[] = [];
   const mix = { comments: 'en', documentation: 'project', commits: 'ja', reviews: 'project' };
   const dialog = await open(page, () => languageState({ uiLocale: resolved('ja'), artifactPolicy: { effective: mix, source: 'config' } }), requests);
-  await expect(dialog.getByRole('combobox', { name: 'ランチャーの表示言語' })).toHaveText('日本語');
+  await expect(dialog.getByRole('combobox', { name: '表示言語' })).toHaveText('日本語');
   await expect(dialog.getByRole('combobox', { name: /コメント/ })).toContainText('commits=ja');
   expect(requests.some(body => body.action === 'language')).toBe(false);
 });
@@ -69,9 +69,9 @@ test('changing the interface language also saves it for Jouzu', async ({ page })
   let state = languageState();
   const dialog = await open(page, () => state, requests);
   state = languageState({ uiLocale: resolved('zh-Hans') });
-  await dialog.getByRole('combobox', { name: 'Launcher interface language' }).click();
+  await dialog.getByRole('combobox', { name: 'Interface language' }).click();
   await page.getByRole('option', { name: '简体中文', exact: true }).click();
-  await expect(dialog.getByRole('combobox', { name: '启动器界面语言' })).toHaveText('简体中文');
+  await expect(dialog.getByRole('combobox', { name: '界面语言' })).toHaveText('简体中文');
   expect(requests.filter(body => body.action === 'language')).toEqual([{ action: 'language', uiLocale: 'zh-Hans' }]);
 });
 
@@ -109,7 +109,7 @@ test('first run asks interface then reply language on its own page, before conne
   await expect(page.getByRole('button', { name: /Shisa\.AI/ })).toHaveCount(0);
   // The reply language suggests the interface language until it is chosen.
   await expect(page.getByRole('combobox', { name: 'Jouzu の応答言語' })).toHaveText('日本語');
-  await page.getByRole('combobox', { name: 'ランチャーの表示言語' }).click();
+  await page.getByRole('combobox', { name: '表示言語' }).click();
   await page.getByRole('option', { name: 'English', exact: true }).click();
   const reply = page.getByRole('combobox', { name: 'Jouzu reply language' });
   await expect(reply).toHaveText('English');

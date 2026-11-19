@@ -27,7 +27,7 @@ test("the page boots from the injected host endpoint", async ({ page }) => {
   await page.goto(`${baseUrl}/`);
   await expect(page.getByRole("heading", { name: "Jouzu", exact: true })).toBeVisible();
   await expect(page.getByRole("complementary", { name: "Workspaces" })).toBeVisible();
-  await expect(page.getByText("Connecting to launcher…")).toHaveCount(0);
+  await expect(page.getByText("Connecting to Jouzu…")).toHaveCount(0);
 
   // The workspace list comes from the host, not from a shell bridge.
   await expect(page.getByRole("button", { name: /add folder/i })).toBeVisible({ timeout: 30_000 });

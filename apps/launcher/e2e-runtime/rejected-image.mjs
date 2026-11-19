@@ -73,7 +73,7 @@ const submit = async text => {
 };
 
 await page.goto(base);
-await page.getByText('Connecting to launcher…').first().waitFor({ state: 'detached', timeout: 60_000 });
+await page.getByText('Connecting to Jouzu…').first().waitFor({ state: 'detached', timeout: 60_000 });
 await page.getByRole('button', { name: /new session/i }).first().click();
 const folder = workspace.split(/[\\/]/u).filter(Boolean).at(-1);
 await page.getByRole('button', { name: 'Choose workspace' }).click();

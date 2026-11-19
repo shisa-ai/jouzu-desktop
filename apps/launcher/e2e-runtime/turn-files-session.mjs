@@ -49,7 +49,7 @@ const workspace = async name => {
 const nameOf = path => path.split(/[\/]/).filter(Boolean).at(-1);
 
 await page.goto(base);
-await page.getByText('Connecting to launcher…').first().waitFor({ state: 'detached', timeout: 60_000 });
+await page.getByText('Connecting to Jouzu…').first().waitFor({ state: 'detached', timeout: 60_000 });
 await page.getByRole('button', { name: /new session/i }).first().click();
 await workspace(nameOf(wsB));
 await turn('Session in B.');

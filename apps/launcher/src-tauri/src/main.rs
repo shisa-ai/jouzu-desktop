@@ -144,7 +144,7 @@ fn terminal_open(app: tauri::AppHandle, path: Option<String>) -> Result<(), Stri
     let slot = active_app::resolve_app(&root, &managed)?;
     let bash = git_environment::find(&managed)?;
     let host = terminal::host(&root)
-        .ok_or("Windows Terminal is unavailable. Install it from the launcher.")?;
+        .ok_or("Windows Terminal is unavailable. Install it in Settings → System.")?;
     let status = std::process::Command::new(crate::runtime_install::node_executable(&root))
         .arg(root.join("runtime/launcher-update/open-terminal.mjs"))
         .arg(&slot)

@@ -26,7 +26,7 @@ fn validate(entries: &[Entry]) -> Result<(), String> {
         if ["JOUZU_HOME", "JOUZU_LAUNCHER_BASH", "NODE_OPTIONS", "PATH"].contains(&name.as_str())
             || name.starts_with("JOUZU_LAUNCHER_DEV_")
         {
-            return Err("This variable is managed by the launcher".into());
+            return Err("This variable is managed by Jouzu Desktop".into());
         }
         if !names.insert(name) {
             return Err("Duplicate variable name".into());

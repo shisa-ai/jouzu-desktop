@@ -82,7 +82,7 @@ async function openBrowser(host, port) {
   }, [base, host.token]);
   const page = await context.newPage();
   await page.goto(base);
-  await page.getByText('Connecting to launcher…').first().waitFor({ state: 'detached', timeout: 120_000 }).catch(() => {});
+  await page.getByText('Connecting to Jouzu…').first().waitFor({ state: 'detached', timeout: 120_000 }).catch(() => {});
   return browser;
 }
 

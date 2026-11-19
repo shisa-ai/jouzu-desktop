@@ -40,7 +40,7 @@ async function open() {
 {
   const { context, page } = await open();
   await page.goto(base);
-  await page.getByText('Connecting to launcher…').first().waitFor({ state: 'detached', timeout: 60_000 });
+  await page.getByText('Connecting to Jouzu…').first().waitFor({ state: 'detached', timeout: 60_000 });
   // As a person does: New session (clickable once the start-up screen is gone), then
   // type. Typing behind the start-up screen went into a composer that was replaced.
   await page.getByRole('button', { name: 'New session', exact: true }).first().click({ timeout: 120_000 });
@@ -64,7 +64,7 @@ async function open() {
   });
   await page.goto(base);
   await page.waitForTimeout(15_000);
-  const loader = await page.getByText('Connecting to launcher…').count();
+  const loader = await page.getByText('Connecting to Jouzu…').count();
   check('loader ends after a startup restart during the entry open', loader === 0, `loader elements: ${loader}`);
   check('the entry session was opened', opened.some(path => typeof path === 'string'), JSON.stringify(opened));
   await page.screenshot({ path: join(tmpdir(), 'entry-restart.png') });

@@ -551,7 +551,7 @@ export function App() {
   // window cannot be closed.
   const firstRunControls = <div className="fixed right-2 top-2 z-50 flex items-center gap-1">{api.capabilities.native && <>
     <Button variant="ghost" aria-label={t.minimize} title={t.minimize} onClick={() => getCurrentWindow().minimize().catch(error => quiet(error))}><Minus /></Button>
-    <Button variant="ghost" aria-label="Close launcher" title={t.dismiss} onClick={() => getCurrentWindow().close().catch(error => quiet(error))}><X /></Button>
+    <Button variant="ghost" aria-label={t.dismiss} title={t.dismiss} onClick={() => getCurrentWindow().close().catch(error => quiet(error))}><X /></Button>
   </>}</div>;
   // The one loading page: its title line says what is happening; a failure shows
   // below it with the detail to copy and a retry.

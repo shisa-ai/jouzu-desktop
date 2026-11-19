@@ -56,7 +56,7 @@ for (const legacy of [false,true]) {
   await dialog.getByRole('button',{name:'Edit',exact:true}).click();
   await expect(dialog.getByLabel('Value',{exact:true})).toHaveValue('fixture-secret');
   await dialog.getByRole('tab',{name:'Language',exact:true}).click();
-  await expect(dialog.getByRole('combobox',{name:'Launcher interface language'})).toBeVisible();
+  await expect(dialog.getByRole('combobox',{name:'Interface language'})).toBeVisible();
   await expect(dialog.getByRole('combobox')).toHaveCount(3);
   const toggle=dialog.getByRole('switch',{name:'Japanese-first mode',exact:true});
   if(!legacy) {
@@ -64,7 +64,7 @@ for (const legacy of [false,true]) {
    await toggle.click(); await expect(toggle).toBeChecked();
    await toggle.click(); await expect(toggle).not.toBeChecked();
   } else await expect(toggle).toBeDisabled();
-  await expect(dialog.getByText(/Changing the launcher language does not turn this off/)).toBeVisible();
+  await expect(dialog.getByText(/Changing the interface language does not turn this off/)).toBeVisible();
   expect(errors).toEqual([]);
  });
 }
@@ -143,7 +143,7 @@ test('the System section shows both update rows with their state and notes', asy
   const notes = jouzu.locator('div.max-h-40');
   await expect(notes).toHaveClass(/overflow-auto/);
   expect(await notes.evaluate((node: HTMLElement) => node.scrollHeight >= node.clientHeight)).toBe(true);
-  const launcher = dialog.locator('section[aria-label="Launcher"]');
+  const launcher = dialog.locator('section[aria-label="Jouzu Desktop"]');
   await expect(launcher.getByText('0.1.20')).toBeVisible();
   await expect(launcher.getByRole('button')).toHaveCount(0);
   // The check's outcome reaches the log, because the interface is where that check runs.
@@ -156,7 +156,7 @@ test('a failed update check is reported and recorded', async ({ page }) => {
     launcherAvailable: false, configured: [true, true], launcherCheckFails: true,
   });
   const dialog = await openSystem(page);
-  const launcher = dialog.locator('section[aria-label="Launcher"]');
+  const launcher = dialog.locator('section[aria-label="Jouzu Desktop"]');
   await expectError(launcher.getByRole('alert'), 'Could not check for updates', 'network');
   const logs: string[] = await page.evaluate(() => (window as any).__logs);
   expect(logs.some(line => line.startsWith('launcher update check failed error='))).toBe(true);
@@ -197,7 +197,7 @@ test('a failed install offers Retry and the launcher update confirms once', asyn
   await expect(jouzu.getByRole('button')).toHaveCount(0);
   expect(await page.evaluate(() => (window as any).__confirms)).toBe(0);
   // The launcher asks once before it restarts.
-  const launcher = dialog.locator('section[aria-label="Launcher"]');
+  const launcher = dialog.locator('section[aria-label="Jouzu Desktop"]');
   await launcher.getByRole('button', { name: 'Update and restart', exact: true }).click();
   await expect(page.getByRole('dialog')).toBeVisible();
   expect(await page.evaluate(() => (window as any).__confirms)).toBe(0);

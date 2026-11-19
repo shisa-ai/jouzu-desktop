@@ -59,12 +59,12 @@ foreach ($info in @($bundledInfo)) {
 }
 if (-not ($Prepare -or $Install)) {
  if ($systemInfo) { Write-Output $systemInfo.path; exit 0 }
- throw 'Windows Terminal is unavailable. Install it from the launcher.'
+ throw 'Windows Terminal is unavailable. Install it in Jouzu Desktop under Settings, System.'
 }
 
 New-Item -ItemType Directory -Path $parent -Force | Out-Null
 if (-not (Test-Path -LiteralPath $archive -PathType Leaf)) {
- if (-not $Install) { throw 'The bundled Windows Terminal package is missing. Install it from the launcher.' }
+ if (-not $Install) { throw 'The bundled Windows Terminal package is missing. Install it in Jouzu Desktop under Settings, System.' }
  $url = "https://github.com/microsoft/terminal/releases/download/v$version/Microsoft.WindowsTerminal_${version}_x64.zip"
  Invoke-WebRequest -Uri $url -OutFile $archive
 }

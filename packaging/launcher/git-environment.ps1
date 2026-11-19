@@ -100,7 +100,7 @@ foreach ($info in @($bundledInfo, $managedInfo)) {
 }
 if (-not ($Prepare -or $Install)) {
  if ($systemInfo) { Write-Output $systemInfo.path; exit 0 }
- throw 'Git Bash is unavailable. Install it from the launcher.'
+ throw 'Git Bash is unavailable. Install it in Jouzu Desktop under Settings, System.'
 }
 
 $parent = Join-Path $InstallRoot 'runtime\git'

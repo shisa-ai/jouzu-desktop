@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { locales, messages, resolveLocale } from "./i18n";
-describe("launcher languages", () => {
+describe("interface languages", () => {
   it("provides every label in every language", () => {
     for (const locale of Object.keys(locales) as (keyof typeof locales)[]) {
       expect(Object.keys(messages[locale]).sort()).toEqual(Object.keys(messages.en).sort());

@@ -45,7 +45,7 @@ pub fn find(root: &Path) -> Result<PathBuf, String> {
     {
         let output = helper_with(root, &[])?;
         if !output.status.success() {
-            return Err(crate::launcher_script::failure(&output, "Git Bash is unavailable. Install it from the launcher."));
+            return Err(crate::launcher_script::failure(&output, "Git Bash is unavailable. Install it in Settings → System."));
         }
         let path = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
         if !path.is_file() {

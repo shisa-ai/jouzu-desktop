@@ -59,6 +59,6 @@ for (const [language, sentence] of [
     const alert = page.locator("[data-session-blocked]");
     await expect(alert).toBeVisible({ timeout: 15_000 });
     await expect(alert).toContainText(sentence);
-    await expect(page.getByText(/Connecting to launcher/i)).toHaveCount(0);
+    await expect(page.getByText(/Connecting to Jouzu/i)).toHaveCount(0);
   });
 }
