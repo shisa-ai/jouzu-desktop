@@ -27,8 +27,13 @@ not one piece of screen.
   when opened, its output. Tool calls running beside it carry on, and so does the
   reply.
 - **A reply fails** (the model provider stopped it, timed out, ran out of credit).
-  The reply ends with a failed marker and a short reason. The latest failed reply
-  has Retry; earlier ones are just marked. The person can type and send as usual.
+  The reply ends with a failed marker and a short reason, once, on the reply (the
+  status line does not repeat it). The latest failed reply has what recovers it:
+  Retry, or Sign in when the key was refused, Settings when the account is out of
+  credit, Remove images when an image was refused; earlier ones are just marked.
+  Until the runtime can rerun a reply (G12), Retry sends the message again, and a
+  message with images gets no Retry. A request the runtime is still retrying is
+  not a failed reply. The person can type and send as usual.
 - **A message could not be sent.** The message stays in the conversation, dimmed,
   with Retry and Discard. Its text is never lost.
 
@@ -38,7 +43,7 @@ The composer shows what can be done now; it does not explain what cannot.
 
 | Situation | Model button next to Send | Send | Other |
 |---|---|---|---|
-| New session, model still getting ready | Shows that it is loading | Unavailable | Typing works |
+| New session, its runtime has not answered yet | Shows the model the host expects (the runtimes' earlier answer); a spinner only when nothing is known yet | Available: the host holds the message until the model is ready | Typing works |
 | No model available | Becomes the way to set one up (opens Settings → Model providers) | Unavailable | Typing works |
 | A reply is running | Normal | Adds the message to the queue above the composer (each item can be edited or removed until the runtime has it) | Stop is next to it |
 | The model has no image input | — | — | The attach-image button is not shown |
@@ -56,10 +61,14 @@ ever appears in the composer's place, and only one at a time.
   shows a small failed mark; its tooltip says why. Nothing else changes.
 - **Stop, compact, export, a command fails**: the result shows at that control
   (the button's state, the command's own output line), not as a session message.
-- A new session shows the model its runtime reports. Restoring the last selected
-  model belongs to the runtime (runtime G1). Until it does, the UI remembers the
-  last pick and selects it once the session is ready; that memory is never shown
-  as the session's state.
+- A new session shows the model its runtime reports, and until then the model
+  the host expects. Restoring the last selected model belongs to the runtime
+  (runtime G1). Until it does, the UI remembers the last pick and sends it with
+  the new conversation; the host hands it to the runtime before any message.
+  The UI never switches the model of a session on its own.
+- The model list is the host's: a new session shows the runtimes' latest list
+  from its first frame. After a settings change it follows the change in open
+  sessions too, without reopening them.
 
 ## 5. Session header and sidebar
 
@@ -67,6 +76,12 @@ ever appears in the composer's place, and only one at a time.
   "Reconnecting…" and the composer is dimmed. The session keeps running in the
   host and the window catches up on reconnect. This is not a session error.
 - The sidebar row shows whether a session is running or has ended; nothing else.
+- The session on screen is a host session. Opening a saved session from the
+  sidebar opens it in the host at once (no runtime until a message needs one);
+  its saved transcript may fill the screen meanwhile, but the composer never
+  shows another session's model, run or Stop. A session the host stopped stays
+  on screen as it is: its model shows, Send works, and the host starts it again
+  for the message. The UI does not reopen sessions on its own.
 
 ## 6. Settings
 
@@ -107,6 +122,7 @@ else comes from host snapshots.
 - The four model copies (catalog list fetched once, per-session list, stored
   preference, the Settings list) and the one-second wait for a default model.
 - Inferring busy state locally.
+- Reopening a stopped session from the UI (`reopenBoundSession` on `stopped`).
 - The local steer queue.
 - Partial queuing of configuration operations and handling of `409`.
 - The notice list in `session-alerts` built from about 14 inputs, and the code
@@ -121,7 +137,7 @@ build before the next.
 | Step | Change | Acceptance |
 |---|---|---|
 | 3 | Session state: render `run` and `queue` only; remove local inference | A send during a Flow run goes to the queue; after Stop the queue is correct |
-| 5 | Model button and lists show only the session's models from the host | Sending right after creating a session no longer loses the message; Send is unavailable while the model is not ready |
+| 5 | Model button and lists show only the models the host relays | A new session: the model is shown and Send is usable the moment the composer shows (0 s); the first message goes out on the picked model; Refresh models or a provider change updates the list of an open session |
 | 7 | Each settings card shows its own progress and result | Several actions in a row all complete; a failed save shows only on its card |
 | 9 | Errors shown where they belong, in four languages | One of two parallel tool calls fails: only its card shows it; model change fails: only the model button changes; session ends: composer replaced by reason and one action; longest text and a long token at the smallest window: nothing moves or widens; no toast component exists |
 

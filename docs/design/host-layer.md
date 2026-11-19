@@ -60,37 +60,64 @@ describes no screens; what a person sees is in the UI document.
   and has not answered; it can no longer be edited or removed), `held` (an
   extension took it and delivers it itself), `returned` (after Stop).
 - A message leaves the queue only after the runtime confirms it used it.
+- The session owns its messages whatever its runtime does. While the runtime is
+  starting or being replaced after it exited (`recovering`), a message is
+  accepted and waits for it. A stopped session starts a runtime again for the
+  next message (the same session, no reopening by the client). Only a failed
+  session refuses (`session-stopped`) until the user restarts it.
 - Open question: confirm that a message sent while a Flow run is streaming is
   delivered as a steer under these rules.
 
 ## 4. Models
 
-- The host keeps no model list of its own. When a runtime attaches or restarts,
-  the host reads `get_state`, `get_available_models` and
-  `get_available_thinking_levels` and puts the answers in `SessionView` as they
-  are.
-- A session's model state is `resolving` (the runtime has not answered yet),
-  `ready` (the runtime reports a model) or `none` (the runtime reports none).
-  Send is refused with `no-model` unless it is `ready`.
-- Changing the model calls RPC `set_model` for that session only. On failure the
-  command returns `model-unavailable` with the runtime's text; the session keeps
-  its model and nothing else changes. The host writes no default and holds no
-  pick of its own.
+- Models are runtime facts. When a runtime attaches or restarts, the host reads
+  `get_state`, `get_available_models` and `get_available_thinking_levels` and
+  puts the answers in `SessionView` as they are, with no filter.
+- The host keeps the runtimes' latest answer: the last list any runtime gave and
+  the model a blank runtime reported at start. Every runtime reads the same
+  configuration, so this is what the next runtime will say. It is shown, never
+  decided by: a session whose runtime has not answered yet shows that list and
+  `model.expected`; its own answer replaces them. `GET /v1/models` serves it while
+  no warm runtime is ready. A configuration change forgets it, and answers from
+  runtimes started before the change are not taken.
+- A session's model state is `resolving` (the runtime has not answered, or the
+  client's pick is on its way), `ready` or `none` (the runtime reports none).
+  `resolving` belongs to a runtime: it exists only while one works for the
+  session. When that runtime ends (stopped, failed, exited) what it was asked
+  ends with it: the session keeps the model its last runtime reported, a pick
+  it never applied stays on the session, and the state is `ready` with that
+  pick or model. A session without a runtime is never `resolving` while it has
+  a model to show. The next runtime gets the pick (or that model).
+- Send is refused (`no-model`) only when the state is `none`. While it is
+  `resolving` the message is accepted and waits; it reaches the runtime once the
+  model is `ready`, or fails with `no-model` at that message. A new session can
+  be sent to the moment it exists.
+- A new conversation can be created with the client's pick (its last choice).
+  The host sends it to the runtime (`set_model`) as soon as the runtime's own
+  list offers it; until then the model is `resolving`, so no message goes out on
+  the model it replaces. A pick the runtime does not list is dropped. A pick made
+  before the runtime answered waits the same way.
+- Changing the model later calls RPC `set_model` for that session only. On
+  failure the command returns `model-unavailable` with the runtime's text; the
+  session keeps its model. The host writes no default.
 - The thinking level is the runtime's: the host follows `thinking_level_changed`.
-- A new session starts its runtime when it is created (a warm one when ready):
-  nothing can be sent until that runtime reports a model.
-- The model facts come from the session's own state requests (the handshake's
-  `get_state`) and the replies to its own model commands. A model change the
-  runtime makes on its own (a slash command) is not reported in RPC mode; the
-  host does not work around that (runtime G3). The liveness probe's answers say only
-  that the runtime lives. A new runtime for the session (recovery) makes the
-  model `resolving` again until it answers. Queued and retried turns wait for
-  `ready` like a send.
-- Settings reads the warm runtime's list (`GET /v1/models`, relayed, not
-  cached; `models-unavailable` while it is not ready). After a configuration
-  operation the host recycles the warm runtime, so its list is the current one;
-  a session's runtime may predate the change and is never asked. Live sessions
-  keep the models they started with until the runtime can reload (runtime G2).
+- A new session starts its runtime when it is created (a warm one when ready).
+  Its file is the runtime's own: the blank session a runtime opens at start in
+  its folder. A new session takes over that session as it is (the warm
+  runtime's `get_state` names its file and model), so its first message takes
+  the same path as every later one, with no `switch_session`. The host writes no
+  session file of its own. Without a warm runtime for the folder, the session's
+  file is known once its runtime reports it.
+- A model change the runtime makes on its own (a slash command) is not reported
+  in RPC mode; the host does not work around that (runtime G3). A new runtime for
+  the session (recovery) makes the model `resolving` again until it answers; the
+  session keeps showing its model meanwhile and hands it to the new runtime.
+  Queued and retried turns wait for `ready` like a send.
+- After a configuration operation the host recycles the warm runtime and every
+  open session's runtime opens its own file again (`switch_session`), which
+  makes it read catalogs, credentials and model settings anew: idle sessions at
+  once, busy ones when their run ends. A message sent meanwhile waits as at
+  start. A new conversation nothing was said in keeps the model it showed.
 
 ## 5. Configuration queue
 
@@ -114,8 +141,8 @@ describes no screens; what a person sees is in the UI document.
   `lastResult[kind].params`, not in the settings. A sign-in waiting for the person shows its
   page and code on `config.running.device`.
 - After an operation that changed configuration the host recycles its warm
-  runtime, so new sessions start with the change. Live sessions are not
-  restarted (runtime G2).
+  runtime and open sessions re-read the configuration (section 4), so new and
+  open sessions both follow the change.
 
 ## 6. Error model
 
@@ -129,7 +156,7 @@ Each error is written to the slot that matches what it interrupted.
 | A message not delivered | The send's response code (the client marks that message) | Sent or discarded |
 | A message the runtime refused, or that lost its runtime | `failedTurn {clientMessageId, text, error {code, text}}`; messages waiting behind it wait for Continue | The next message (not a slash command), or Retry |
 | A slash command the runtime refused | Its answer: `session.command_done` with `success: false` and the runtime's `error` | Next command |
-| A reply (run) | The reply's record (`stopReason: error`, the provider's text) | Never; history |
+| A reply (run) | The reply's record (`stopReason: error`, the provider's text, and `errorCode`: `auth`, `quota`, `rate-limit`, `model-unavailable`, `image`, `unavailable` or `other`, read from that text in one place, `provider_error.rs`, until the runtime gives codes, G6). While the runtime retries, the step's `retry` carries the same code | Never; history |
 | A command in a session (stop, compact, export, model change) | The command's response code. Commands the host sends without a caller waiting keep the runtime's words for their control: Stop's abort as `activeTurn.stopError` (the run goes on), the model list as `modelListError` | Next command of that kind; a list that arrives |
 | The session ended | `failure`, `lifecycle = failed`, entered only through `Session::fail` | Recovery succeeds |
 | A settings operation | `AppView.config.lastResult[kind]` | Next operation of that kind |
@@ -231,7 +258,7 @@ host, then the UI, then verified on the packaged build before the next.
 | Step | Change | Acceptance |
 |---|---|---|
 | 2 | Runs driven by `agent_start` / `agent_settled`; steer decision; `held` / `returned` queue states | A send during a Flow run becomes a steer; after Stop, unused messages are back in the queue |
-| 4 | Models relayed from each runtime | Every model offered is accepted by `set_model`; a new session shows the runtime's model with no client call; with no model, a direct API send gets `no-model`; after a model change the level shown is the runtime's |
+| 4 | Models relayed from each runtime | Every model offered is accepted by `set_model`; a new session shows a model and takes a message the moment it exists; the first message goes out on the client's pick when the runtime lists it; with no model, a send fails with `no-model`; after a settings change an open session's list follows it; after a model change the level shown is the runtime's |
 | 6 | ConfigQueue | Saving a key while the catalog refreshes: both complete, no `409` |
 | 8 | Error slots, escalation, codes, `host.log` | One of two parallel tool calls fails: only its `tool.result` changes; a session ends: exactly one `failure`, cascades in the log; with no model, a direct API send gets `no-model`; every error has code, parameters and original text |
 
