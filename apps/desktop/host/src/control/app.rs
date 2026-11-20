@@ -3,7 +3,7 @@
 //! The shell owns the same rules today; the host takes them over unchanged so a
 //! receipt can never point the host at an arbitrary directory.
 
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
@@ -93,7 +93,7 @@ pub fn resolve_app(install: &Path, managed: &Path) -> Result<PathBuf, String> {
 /// another version would run Jouzu's code with different behaviour, and the
 /// difference would only show as strange errors. A missing one is reported.
 pub fn node_executable(managed: &Path) -> PathBuf {
-    managed.join("runtime").join("node").join("node.exe")
+    crate::session::managed_node_path(managed)
 }
 
 /// Node's entrypoint resolver rejects Windows verbatim paths. Keep canonical paths
@@ -101,7 +101,7 @@ pub fn node_executable(managed: &Path) -> PathBuf {
 pub fn process_path(path: &Path) -> PathBuf {
     #[cfg(windows)]
     {
-        use std::path::Prefix;
+        use std::path::{Component, Prefix};
         let mut components = path.components();
         if let Some(Component::Prefix(prefix)) = components.next() {
             let mut output = match prefix.kind() {

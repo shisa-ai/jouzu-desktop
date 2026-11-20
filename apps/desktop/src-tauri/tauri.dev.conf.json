@@ -1,4 +1,7 @@
 {
   "identifier": "ai.shisa.jouzu.desktop.dev",
-  "productName": "Jouzu Desktop Dev"
+  "productName": "Jouzu Desktop Dev",
+  "build": {
+    "devUrl": "http://127.0.0.1:1420"
+  }
 }

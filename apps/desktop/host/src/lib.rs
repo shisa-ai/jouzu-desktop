@@ -5497,7 +5497,7 @@ mod session_tests {
         assert_eq!(error.code, "runtime-missing", "{}", error.message);
 
         // What the first-run preparation writes: the bundled Node, then the app.
-        let node = managed.path().join("runtime").join("node").join("node.exe");
+        let node = crate::session::managed_node_path(managed.path());
         std::fs::create_dir_all(node.parent().unwrap()).unwrap();
         std::fs::copy(RuntimeSpec::node_script(&fixture()).program, &node).unwrap();
         let app = managed.path().join("app");

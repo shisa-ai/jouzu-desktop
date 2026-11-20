@@ -228,10 +228,20 @@ fn host_binary(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     }
     #[cfg(debug_assertions)]
     {
-        let dev = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../host/target/debug/jouzu-host.exe");
-        if dev.is_file() {
-            return Ok(dev);
+        // cargo names the binary `jouzu-host` on Unix and `jouzu-host.exe`
+        // on Windows; prefer the platform name so a stale copy under the
+        // other name can never shadow a fresh build.
+        let debug = Path::new(env!("CARGO_MANIFEST_DIR")).join("../host/target/debug");
+        let names = if cfg!(windows) {
+            ["jouzu-host.exe", "jouzu-host"]
+        } else {
+            ["jouzu-host", "jouzu-host.exe"]
+        };
+        for name in names {
+            let dev = debug.join(name);
+            if dev.is_file() {
+                return Ok(dev);
+            }
         }
     }
     if let Ok(resource) = app.path().resource_dir() {

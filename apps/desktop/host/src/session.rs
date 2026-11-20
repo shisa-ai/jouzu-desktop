@@ -123,6 +123,21 @@ use sha2::{Digest, Sha256};
 
 pub const DEFAULT_REPLAY_LIMIT: usize = 5_000;
 
+/// The Node executable inside a bundled distribution: `node.exe` on Windows,
+/// `bin/node` in the official Unix tarballs.
+pub fn node_executable_path(node_root: &Path) -> PathBuf {
+    if cfg!(windows) {
+        node_root.join("node.exe")
+    } else {
+        node_root.join("bin").join("node")
+    }
+}
+
+/// The bundled Node under a managed directory (its `runtime/node` folder).
+pub fn managed_node_path(managed: &Path) -> PathBuf {
+    node_executable_path(&managed.join("runtime").join("node"))
+}
+
 #[derive(Clone)]
 pub struct RuntimeSpec {
     pub program: PathBuf,
@@ -136,7 +151,7 @@ impl RuntimeSpec {
     pub fn managed_node(managed: &Path) -> PathBuf {
         std::env::var_os("JOUZU_HOST_NODE")
             .map(PathBuf::from)
-            .unwrap_or_else(|| managed.join("runtime").join("node").join("node.exe"))
+            .unwrap_or_else(|| managed_node_path(managed))
     }
 
     /// The provisioned runtime rooted at the managed directory.
@@ -159,7 +174,8 @@ impl RuntimeSpec {
 
     pub fn node_script(script: &Path) -> Self {
         Self {
-            program: find_program("node.exe").unwrap_or_else(|| PathBuf::from("node")),
+            program: find_program(if cfg!(windows) { "node.exe" } else { "node" })
+                .unwrap_or_else(|| PathBuf::from(if cfg!(windows) { "node.exe" } else { "node" })),
             args: vec![script.to_string_lossy().into_owned()],
             env: Vec::new(),
         }
@@ -6392,9 +6408,19 @@ impl SessionManager {
             "hostVersion": env!("CARGO_PKG_VERSION"),
             "runtimeHome": self.runtime_home.to_string_lossy(),
             "appVersion": app_version,
-            "node": self.home.join("runtime").join("node").join("node.exe").is_file(),
+            "node": managed_node_path(&self.home).is_file(),
             "app": self.home.join("app").join("bootstrap.mjs").is_file(),
-            "bash": self.home.join("runtime").join("git").join("bin").join("bash.exe").is_file(),
+            // The bash sessions start with: the one given to the host, else the
+            // same lookup each spawn makes (bundled Git Bash on Windows, the
+            // system bash on macOS and Linux).
+            "bash": self
+                .config
+                .get()
+                .and_then(|config| config.bash.clone())
+                .or_else(|| self.managed.as_ref().and_then(|managed| managed.bash.clone()))
+                .filter(|bash| bash.is_file())
+                .or_else(|| find_bash(&self.home))
+                .is_some(),
             "git": self.home.join("runtime").join("git").exists(),
             "terminal": self.home.join("runtime").join("terminal").exists(),
             "warmRuntime": self.warm_runtime().map(|pool| pool.status()),
@@ -7112,7 +7138,7 @@ impl SessionManager {
             // Without a `--runtime`, the host runs the bundled Node and app; say
             // which one is missing rather than falling back to anything else.
             // The installation is under the host home; Jouzu's data may be elsewhere.
-            let node = self.home.join("runtime").join("node").join("node.exe");
+            let node = managed_node_path(&self.home);
             let message = if !node.is_file() {
                 format!("Jouzu's bundled Node.js is missing ({}). Reinstall Jouzu to restore it.", node.display())
             } else {
@@ -7391,12 +7417,21 @@ pub fn find_bash(managed: &Path) -> Option<PathBuf> {
             return Some(path);
         }
     }
-    let candidates = [
-        managed.join("runtime/git/installed/bin/bash.exe"),
-        managed.join("runtime/git/PortableGit/bin/bash.exe"),
-        managed.join("runtime/git/bin/bash.exe"),
-        PathBuf::from(r"C:\Program Files\Git\bin\bash.exe"),
-    ];
+    let candidates: Vec<PathBuf> = if cfg!(windows) {
+        vec![
+            managed.join("runtime/git/installed/bin/bash.exe"),
+            managed.join("runtime/git/PortableGit/bin/bash.exe"),
+            managed.join("runtime/git/bin/bash.exe"),
+            PathBuf::from(r"C:\Program Files\Git\bin\bash.exe"),
+        ]
+    } else {
+        // No bundled Git on Unix; the system shell is the runtime's bash.
+        vec![
+            managed.join("runtime/git/bin/bash"),
+            PathBuf::from("/bin/bash"),
+            PathBuf::from("/usr/bin/bash"),
+        ]
+    };
     candidates.into_iter().find(|path| path.is_file())
 }
 
