@@ -325,11 +325,24 @@ async function longSessionScenario() {
   const shownEarlier = /^Show \d+ earlier messages?$/;
   const earlier = () => conversation().getByRole("button").filter({ hasText: shownEarlier })
     .or(conversation().getByRole("button", { name: C.loadEarlier, exact: true })).first();
+  const loading = () => conversation().getByRole("button", { name: C.loadingEarlier }).first();
+  // After a click the button is replaced (loading, then the next "earlier" button);
+  // the user keeps asking until none comes back. Settled: 2 s with neither shown.
+  const nextOffer = async () => {
+    const end = now() + 30_000;
+    let quietSince = now();
+    while (now() < end) {
+      if (await earlier().isVisible().catch(() => false)) return true;
+      if (await loading().isVisible().catch(() => false)) quietSince = now();
+      else if (now() - quietSince >= 2_000) return false;
+      await page.waitForTimeout(100);
+    }
+    return false;
+  };
   let clicks = 0;
-  while (await earlier().isVisible().catch(() => false)) {
+  while (await nextOffer()) {
     await earlier().click();
     clicks += 1;
-    await conversation().getByRole("button", { name: C.loadingEarlier }).waitFor({ state: "detached", timeout: 30_000 }).catch(() => {});
     if (clicks > turns * 3) break;
   }
   await mark("longSessionToFirstMessage", now() - start);

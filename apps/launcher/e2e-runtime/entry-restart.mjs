@@ -9,7 +9,7 @@ import { hostAccess } from './host-access.mjs';
 // waiting for a runtime (the first start after an update).
 // Against a running host on a throwaway home (JOUZU_E2E_HOST_HOME: the host's --home,
 // model-ready with the fixture provider, fixture server running):
-//   1. send one message, so the workspace has an entry session;
+//   1. open a new session and send one message, so the workspace has an entry session;
 //   2. reopen with the same browser profile. The first lease is held 4 s. The loader
 //      must be gone and the entry session open. (A catalog revision activated at
 //      startup used to restart the chat here; configuration changes no longer
@@ -41,6 +41,9 @@ async function open() {
   const { context, page } = await open();
   await page.goto(base);
   await page.getByText('Connecting to launcher…').first().waitFor({ state: 'detached', timeout: 60_000 });
+  // As a person does: New session (clickable once the start-up screen is gone), then
+  // type. Typing behind the start-up screen went into a composer that was replaced.
+  await page.getByRole('button', { name: 'New session', exact: true }).first().click({ timeout: 120_000 });
   await page.getByRole('textbox', { name: /message/i }).first().fill('Reply with OK.');
   await page.getByRole('button', { name: /^send$/i }).first().click({ timeout: 30_000 });
   await page.getByRole('button', { name: /^send$/i }).first().waitFor({ timeout: 60_000 });
