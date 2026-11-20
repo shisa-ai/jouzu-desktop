@@ -82,6 +82,44 @@ async function waitForConversationText(text, timeout = 30_000) {
   await conversation().getByText(text, { exact: true }).first().waitFor({ timeout });
 }
 
+/**
+ * Times "own message visible" and "working visible" inside the page, so the number is
+ * the app's: from the Send click event (event.timeStamp) to the animation frame in
+ * which the message (one more copy of `text` in the Conversation region) and the Stop
+ * button are in the DOM. Measured from outside, the same moments also hold the
+ * driver's actionability checks, CDP round trips and polling backoff.
+ */
+async function armVisibleTimer(text) {
+  await page.evaluate(([text, regionName, stopName]) => {
+    window.__jouzuVisibleTimer?.observer.disconnect();
+    const region = () => document.querySelector(`section[aria-label="${CSS.escape(regionName)}"], [role="region"][aria-label="${CSS.escape(regionName)}"]`);
+    const copies = () => (region()?.textContent ?? "").split(text).length - 1;
+    const stopShown = () => [...document.querySelectorAll("button")].some(b => (b.getAttribute("aria-label") || b.textContent || "").trim() === stopName);
+    const state = { click: null, own: null, stop: null, before: copies() };
+    const frame = key => { const seen = performance.now(); requestAnimationFrame(() => { state[key] = performance.now(); state[`${key}Dom`] = seen; }); };
+    const check = () => {
+      if (state.click == null) return;
+      if (state.ownDom === undefined && copies() > state.before) { state.ownDom = null; frame("own"); }
+      if (state.stopDom === undefined && stopShown()) { state.stopDom = null; frame("stop"); }
+    };
+    const observer = new MutationObserver(check);
+    observer.observe(document, { subtree: true, childList: true, characterData: true, attributes: true });
+    document.addEventListener("click", event => { if (state.click == null) { state.click = event.timeStamp; check(); } }, { capture: true, once: true });
+    window.__jouzuVisibleTimer = { state, observer };
+  }, [text, C.conversation, C.stop]);
+}
+
+/** Milliseconds from the click to the frame showing each; null when not seen. */
+async function readVisibleTimer() {
+  return page.evaluate(() => {
+    const timer = window.__jouzuVisibleTimer;
+    timer?.observer.disconnect();
+    const s = timer?.state ?? {};
+    const since = at => (s.click == null || at == null ? null : Math.round(at - s.click));
+    return { own: since(s.own), stop: since(s.stop) };
+  });
+}
+
 /** A 32×32 solid red PNG, built here so the playbook needs no fixture file. */
 async function redSquarePng() {
   const { deflateSync } = await import("node:zlib");
@@ -778,14 +816,15 @@ try {
 
   // The first turn of a new session, PLAYBOOK_REPEAT times (default 5), each in a
   // session of its own on the selected model.
-  // Gated (the app's own work): own message visible, the turn visibly working (Stop).
+  // Gated (the app's own work): own message visible, the turn visibly working (Stop),
+  // timed inside the page: from the Send click event to the frame that shows it.
   // Recorded only: the answer itself. It waits for the provider and the model's
   // reasoning (0.5-7 s measured for one prompt, #97), which no app change can bound;
   // the host's part of it is gated from host.log in the report (send to model request).
   const prompt = "What is 17 × 23? Reply with only the number.";
   const reply = "391";
   const repeat = Math.max(1, Number(process.env.PLAYBOOK_REPEAT ?? 5));
-  const own = [], working = [], readable = [], ended = [], sendWait = [], newToReply = [];
+  const own = [], working = [], readable = [], ended = [], sendWait = [], newToReply = [], ownDriver = [], workingDriver = [];
   let freshOk = true;
   for (let i = 0; i < repeat; i++) {
     // From New session as the user sees it: nothing between the click and the
@@ -810,11 +849,12 @@ try {
       }
       sendWait.push(waited);
     }
+    await armVisibleTimer(prompt);
     start = now();
     await send().click();
     const ownSeen = waitForConversationText(prompt, 5_000).then(() => now() - start);
     const stopSeen = stop().waitFor({ timeout: 5_000 }).then(() => now() - start, () => null);
-    own.push(await ownSeen);
+    ownDriver.push(await ownSeen);
     const stopMs = await stopSeen;
     await waitForConversationText(reply, 60_000);
     readable.push(now() - start);
@@ -823,8 +863,12 @@ try {
     await stop().waitFor({ state: "detached", timeout: 30_000 }).catch(() => {});
     await send().waitFor({ timeout: 30_000 });
     ended.push(now() - start);
+    const inPage = await readVisibleTimer();
+    if (inPage.own == null) throw new Error("own message visible: the in-page timer saw no click or no message");
+    own.push(inPage.own);
     // A reply faster than Stop could be seen shows the turn as done instead.
-    working.push(stopMs ?? readable[readable.length - 1]);
+    working.push(inPage.stop ?? inPage.own);
+    workingDriver.push(stopMs ?? readable[readable.length - 1]);
     freshOk &&= (await conversation().innerText()).includes(reply);
   }
   // 0 ms: a new session is sendable the moment its composer shows.
@@ -832,6 +876,11 @@ try {
   if (newToReply.length) record("newSessionToReply", newToReply);
   assertRepeatedGate("ownMessageVisible", own, 100);
   assertRepeatedGate("workingVisible", working, 100);
+  // The same two moments as the driver sees them (click() call to waitFor() resolving):
+  // they add the driver's actionability checks, CDP round trips and polling backoff
+  // (20, 50, 100 ms) and whatever else the machine runs. Recorded, never gated.
+  record("ownMessageVisibleDriver", ownDriver);
+  record("workingVisibleDriver", workingDriver);
   record("warmFirstReadable", readable);
   record("turnObservedEnd", ended);
   scenario("P0-1 fresh turn", freshOk, `${repeat} new sessions`);
