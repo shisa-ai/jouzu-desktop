@@ -54,7 +54,7 @@ describe("one Jouzu Desktop row (ui-layer §6.2)", () => {
 
   it("offers a newer build as an update with its notes and the channel", () => {
     const html = render({ phase: "available", target: "1.1.5", notes: "### New notes\n- A change" });
-    expect(html).toContain("Update available");
+    expect(html.split("Update available").length - 1).toBe(1);
     expect(html).toContain("Update and restart");
     expect(html).toContain("New notes");
     expect(html).toContain("A change");

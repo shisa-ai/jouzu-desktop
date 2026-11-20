@@ -155,7 +155,7 @@ export function UpdatePreview({ locale, live, runtime, focusIndex, repair }: {
             : realUpdate
               ? <div className="flex flex-wrap items-center gap-2"><span className="rounded-full bg-primary/15 px-2 py-0.5 text-xs font-medium text-primary">{t.availableTag}</span><Button disabled={busy} onClick={() => setConfirmInstall(true)}><Download className="size-4" />{t.updateDesktop}</Button></div>
               : state === 'error'
-                ? <Button variant="outline" className="h-9 w-9 p-0" aria-label={t.retry} title={t.retry} disabled={busy} onClick={() => (live.target ? setConfirmInstall(true) : live.check())}><RefreshCw className="size-4" /></Button>
+                ? <Button variant="outline" className="h-9 w-9 p-0" aria-label={t.retry} title={t.retry} disabled={busy} onClick={() => (live.target ? live.install() : live.check())}><RefreshCw className="size-4" /></Button>
                 : state === 'downloading' || state === 'installing'
                   ? <span role="status" className="flex items-center gap-2 text-sm text-muted-foreground"><LoaderCircle className="size-4 animate-spin" />{state === 'downloading' ? t.downloading : t.installing}</span>
                   : state === 'checking'
@@ -172,7 +172,6 @@ export function UpdatePreview({ locale, live, runtime, focusIndex, repair }: {
             {channel && <div className="flex flex-wrap items-center gap-3"><span className="text-sm">{t.channel}</span><Select value={channel.value} disabled={busy} onValueChange={value => channel.set(value as 'stable' | 'qa')}><SelectTrigger aria-label={t.channel} className="w-48"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="stable">{t.stable}</SelectItem><SelectItem value="qa">{t.qa}</SelectItem></SelectContent></Select>{channel.value === 'qa' && <p className="w-full text-xs text-muted-foreground">{t.qaHint}</p>}</div>}
           </>}
           {realUpdate && <>
-            <p className="text-sm text-muted-foreground">{t.availableTag} {live.target}</p>
             {channel && <div className="flex flex-wrap items-center gap-3"><span className="text-sm">{t.channel}</span><Select value={channel.value} disabled={busy} onValueChange={value => channel.set(value as 'stable' | 'qa')}><SelectTrigger aria-label={t.channel} className="w-48"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="stable">{t.stable}</SelectItem><SelectItem value="qa">{t.qa}</SelectItem></SelectContent></Select>{channel.value === 'qa' && <p className="w-full text-xs text-muted-foreground">{t.qaHint}</p>}</div>}
             {live.notes
               ? <div className="max-h-40 overflow-auto rounded-md bg-muted/40 p-2"><p className="text-xs font-medium">{noteText[locale][0]}</p><ul className="mt-1 space-y-1">{noteItems(live.notes)}</ul></div>

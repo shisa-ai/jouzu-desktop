@@ -687,7 +687,7 @@ export function App() {
                     channel: updater.channel && components?.desktopUpdaterConfigured ? { value: updater.channel, set: value => void updater.setChannel(value) } : undefined,
                     check:()=>void updater.refresh(),
                     install:()=>void updater.install()
-                  }} repair={components?.jouzu || import.meta.env.DEV ? undefined : { label: recoveryText[locale].action, run: () => { void (async () => {
+                  }} repair={components?.jouzu && runtime.state?.nodeCurrent !== false ? undefined : { label: recoveryText[locale].action, run: () => { void (async () => {
                       if (!await confirm(recoveryText[locale].description, {title: recoveryText[locale].title, kind: "warning"})) return;
                       setOperation("saving"); setError(null);
                       try { await invoke("repair_jouzu"); setComponents(await invoke<Components>("component_versions")); await refresh(); await refreshDiagnostics(); }
