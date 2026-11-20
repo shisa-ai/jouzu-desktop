@@ -6,7 +6,9 @@ name: Desktop stable release
 #      normal icon (QA packages carry the QA icon, #74);
 #   3. run the full user playbook on that build with a real model, on every platform
 #      the desktop ships (Windows today); every scenario and gate must pass;
-#   4. only then publish v<X.Y.Z> and replace the stable feed (desktop-update);
+#   4. only then publish v<X.Y.Z> and replace the stable feed (desktop-update), with the
+#      CHANGELOG section for X.Y.Z as its notes (stable users may come from an older stable
+#      release, not from the candidate, so the candidate's notes are not enough);
 #   5. SmartScreen (Authenticode) signing goes into step 2 once the certificate exists.
 # Nothing here writes to the QA feed.
 
@@ -66,6 +68,7 @@ jobs:
           if gh release view "v$version" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then exists=tag-exists; fi
           node packaging/launcher/release-guard.mjs stable "$CANDIDATE" "$GITHUB_REPOSITORY" "$release" "$exists"
           commit="$(gh api "repos/$GITHUB_REPOSITORY/commits/v$CANDIDATE" --jq .sha)"
+          node packaging/launcher/launcher-notes.mjs CHANGELOG.md "$version" > /dev/null
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "commit=$commit" >> "$GITHUB_OUTPUT"
           echo "Stable $version from v$CANDIDATE ($commit)"
@@ -175,7 +178,7 @@ jobs:
           QA_RESULT: ${{ inputs.qa_result }}
         run: |
           version='${{ needs.prepare.outputs.version }}'
-          gh release view "v$CANDIDATE" --repo "$GITHUB_REPOSITORY" --json body --jq .body > notes.md
+          node packaging/launcher/launcher-notes.mjs CHANGELOG.md "$version" > notes.md
           printf '\n\nQA (%s): %s\n' "$CANDIDATE" "$QA_RESULT" >> notes.md
           node packaging/launcher/desktop-feed.mjs "$version" notes.md "$GITHUB_REPOSITORY" "JouzuDesktop_${version}_x64-setup.exe" "release/JouzuDesktop_${version}_x64-setup.exe.sig" latest.json
           cat latest.json

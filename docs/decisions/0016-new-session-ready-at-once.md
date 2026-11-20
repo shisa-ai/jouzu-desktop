@@ -1,7 +1,7 @@
 # 0016 — A new session is ready at once
 
-Status: Accepted. Not met by 1.1.3-rc.3 (Send waits for the runtime); the fix is in progress
-for 1.1.4.
+Status: Accepted. Met in 1.1.4 (#160): Send is usable at once and the model shows from what
+the runtimes last reported. 1.1.3-rc.3 did not meet it (Send waited for the runtime).
 Date: 2026-11-18 (warm pool 2026-11-14)
 
 ## Context

@@ -1,5 +1,42 @@
 # Changelog
 
+## 1.1.4 - 2026-11-20
+
+Stable release. It follows 1.0.23 on the stable channel and contains everything from 1.1.0
+to 1.1.4-rc.1 (the QA channel's release candidates), listed step by step in the changelog. It
+was built again from the commit of 1.1.4-rc.1, which passed QA. Your sessions, settings and
+sign-ins stay where they are.
+
+- Chats keep running on their own. Closing or reloading the window no longer stops a reply,
+  and a window that reconnects catches up. If the model runtime stops, the session recovers
+  with its messages and its model, and a message that got no reply offers Retry.
+- A new session can send at once. Its model shows right away and the model picked last is
+  used from the first message. Recent folders are kept ready, so opening a session there does
+  not wait for the model runtime to start.
+- Messages sent while a reply is running wait in a visible queue and are delivered once; Stop
+  keeps them so you can continue or discard them. Stop pressed right after Send stops the
+  reply.
+- Each problem is shown once, where it happened, in the interface language, with the action
+  that recovers it: a failed reply on the reply with Retry, a session that cannot recover with
+  Restart session, a setting that cannot be saved on its own form. Nothing moves when an error
+  appears. Provider errors, including the Shisa.AI plan, balance and capacity errors, are
+  named plainly.
+- A model refresh or a key or provider change reaches sessions that are already open. Settings
+  actions run one after another instead of failing because another one is running.
+- Settings has a Language page for the interface and reply language, shared with Jouzu in a
+  terminal, and a Web access page to allow a browser on this computer or on trusted networks,
+  each paired with a one-time code. Web access stays off until you turn it on.
+- The image tool offers every provider your account can generate images with, and says why
+  any other one cannot be used. Images in a message stay visible after switching sessions or
+  reloading. When a model refuses an image, the session offers Remove images or New session.
+- Long sessions can be read back to their first message. Saved sessions open on the model they
+  last used, including sessions written by older versions or cut off mid-line.
+- After the computer wakes from sleep, the chat no longer stays on "Starting session...".
+- Fewer background model runtimes: a session no window shows gives its runtime back after
+  about a minute.
+- Settings → System has an update channel. QA receives release candidates before stable; you
+  can switch back to stable at any time.
+
 ## 1.1.4-rc.1 - 2026-11-19
 
 First release candidate for 1.1.4, on the QA channel. It replaces 1.1.3-rc.3, which did not

@@ -22,8 +22,8 @@ Records 0001–0012 come from the former planning repository (migrated 2026-11-1
 | [0012](0012-control-ownership.md) | Control ownership: the host executes Jouzu configuration | Partly implemented; D5 superseded by 0015 |
 | [0013](0013-docs-in-product-repo.md) | Decisions and design live in the product repository | Accepted |
 | [0014](0014-three-layers-single-owner.md) | Three layers, one owner per piece of state | Accepted; remaining duplicates listed in design docs |
-| [0015](0015-runtime-facts-relayed-not-reinterpreted.md) | Runtime facts are relayed, not reinterpreted | Accepted; not yet met on develop (1.1.4) |
-| [0016](0016-new-session-ready-at-once.md) | A new session is ready at once | Accepted; not met by 1.1.3-rc.3 (1.1.4) |
+| [0015](0015-runtime-facts-relayed-not-reinterpreted.md) | Runtime facts are relayed, not reinterpreted | Accepted; met in 1.1.4 |
+| [0016](0016-new-session-ready-at-once.md) | A new session is ready at once | Accepted; met in 1.1.4 |
 | [0017](0017-errors-at-their-scope.md) | Errors are shown at their own scope | Implemented in 1.1.3-rc.3 |
 | [0018](0018-one-data-home-never-copied.md) | One data home, never copied | Implemented in 1.1.3-rc.2 |
 | [0019](0019-development-and-release-gates.md) | Development checks are fast; release checks judge the installed product | Accepted; stable release checks not yet automated |
