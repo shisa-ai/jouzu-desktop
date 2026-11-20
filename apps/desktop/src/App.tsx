@@ -7,7 +7,7 @@ import { ProviderPicker } from "./components/ui/provider-picker";
 import { recoveryText } from "./recovery-text";
 import { describeError } from "./runtime-errors";
 import { NoticeRow } from "./session-alerts-view";
-import { UpdatePreview } from "./update-preview";
+import { UpdatePreview, hasUpdateMark } from "./update-preview";
 import { GitBashSection, useGitBash } from "./git-bash-section";
 import { TerminalSection } from "./terminal-section";
 import { CommandEntrySection } from "./command-entry-section";
@@ -348,7 +348,7 @@ export function App() {
   }
   function openUpdatePanel() {
     // A waiting update is not a question to re-ask: the header opens the System list on the one row that has it.
-    setUpdateFocus(updater.version && !updater.downgrade ? 0 : null);
+    setUpdateFocus(hasUpdateMark(updater.version, updater.downgrade) ? 0 : null);
     setSettingsTab("system");
     setSettingsOpen(true);
   }
@@ -769,7 +769,7 @@ export function App() {
 
         onSettings={() => setSettingsOpen(true)}
         onUpdate={openUpdatePanel}
-        updateAvailable={!!(updater.version && !updater.downgrade)}
+        updateAvailable={hasUpdateMark(updater.version, updater.downgrade)}
         updateBusy={updater.busy}
       />
     </div>}

@@ -1,6 +1,6 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { UpdatePreview, type DesktopUpdateState, type RuntimeDetailState } from "./update-preview";
+import { UpdatePreview, hasUpdateMark, type DesktopUpdateState, type RuntimeDetailState } from "./update-preview";
 
 const live = (over: Partial<DesktopUpdateState> = {}): DesktopUpdateState => ({
   version: "1.1.4-rc.1",
@@ -82,6 +82,14 @@ describe("one Jouzu Desktop row (ui-layer §6.2)", () => {
     expect(render({ phase: "downloading", progress: 40 })).toContain("Downloading…");
     expect(render({ phase: "downloading" })).toContain("progressbar");
     expect(render({ phase: "installing" })).toContain("Installing…");
+  });
+});
+
+describe("the sidebar update mark follows a real update only (#176)", () => {
+  it("marks a newer build, and not an older build offered on the channel", () => {
+    expect(hasUpdateMark("1.1.5", false)).toBe(true);
+    expect(hasUpdateMark("1.0.23", true)).toBe(false);
+    expect(hasUpdateMark(null, false)).toBe(false);
   });
 });
 

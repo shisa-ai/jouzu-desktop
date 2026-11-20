@@ -79,6 +79,11 @@ const noteText: Record<Locale, [string, string]> = {
 
 export type Phase = 'idle' | 'checking' | 'available' | 'current' | 'downloading' | 'installing' | 'error';
 
+/** The sidebar's update mark: a real update, never an older build offered on the channel (#176). */
+export function hasUpdateMark(version: string | null, downgrade: boolean): boolean {
+  return !!version && !downgrade;
+}
+
 export interface DesktopUpdateState {
   /** The version of the app that is installed. */
   version: string | null;
