@@ -17,11 +17,11 @@ export function ComponentSection({ title, status, note, tone, busy, error, insta
       <h3 className="font-medium">{title}</h3>
       {status && <p className={`mt-1 text-sm ${tone === 'missing' ? 'text-destructive' : 'text-muted-foreground'}`}>{status}</p>}
     </div>
-    <div className="flex flex-wrap items-center gap-2">
+    <div className="flex min-h-10 items-center gap-2">
         {<span className="flex size-4 items-center justify-center">{busy && <LoaderCircle className="size-4 animate-spin" aria-hidden="true" />}</span>}
-        {/* The action is always in the row: without an action it is disabled, so nothing the row shows
-            arriving or leaving moves the layout. */}
-        {<Button disabled={busy || !install} onClick={install}>{installLabel}</Button>}
+        {/* The slot keeps its height, but holds a button only when an action applies
+            (ui-layer §6.3). Checking and a copy in use leave it empty. */}
+        {<span className="flex h-10 min-w-40 items-center">{install && !busy ? <Button onClick={install}>{installLabel}</Button> : null}</span>}
     </div>
     {note && <p role="status" className="text-xs text-muted-foreground">{note}</p>}
     {error && <ErrorLine raw={error} failed={t.componentActionFailed} />}

@@ -13,7 +13,6 @@ import { TerminalSection } from "./terminal-section";
 import { CommandEntrySection } from "./command-entry-section";
 import { ComponentSection, useComponent } from "./components/component-row";
 import { ReportSection } from "./report-section";
-import { useJouzuUpdate } from "./use-jouzu-update";
 import { useDesktopUpdate } from "./use-desktop-update";
 import { Label } from "./components/ui/label";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -48,7 +47,7 @@ import { type Workspace } from "./history";
 import { parseDiagnostics, type Diagnostics } from "./diagnostics";
 import { copyText } from "./secure-context";
 interface ShellState { platform: "windows" | "macos" | "linux"; recent: Workspace[]; ready: boolean; bash: boolean; bundled_git: boolean }
-interface Components { jouzu: string | null; development: boolean; desktopUpdaterConfigured?: boolean; jouzuUpdaterConfigured?: boolean; build?: string; commit?: string }
+interface Components { jouzu: string | null; development: boolean; desktopUpdaterConfigured?: boolean; build?: string; commit?: string }
 interface RuntimeReport { status?: string; version: string | null; expectedVersion?: string; versionCurrent?: boolean; minimumVersion?: string; verifiedVersions?: string[]; mandatory?: boolean; root: string | null; app: string | null; node: boolean; nodeVersion: string | null; nodeCurrent: boolean; git: boolean; terminal: boolean }
 type Theme = "dark" | "light" | "system";
 
@@ -92,7 +91,6 @@ export function App() {
     return () => window.clearInterval(timer);
   }, [entryBooting]);
   const entryReady = useRef(false);
-  const [restartPending, setRestartPending] = useState(false);
   // Configuration and its operations are the host's (AppView): this window renders
   // them and sends commands, and keeps no copy or queue of its own.
   const appView = useAppView();
@@ -178,11 +176,6 @@ export function App() {
   const [version, setVersion] = useState<string | null>(null);
   const [diagnostics, setDiagnostics] = useState<Diagnostics | null>(null);
   const [components, setComponents] = useState<Components | null>(null);
-  const jouzuUpdater = useJouzuUpdate(components?.jouzuUpdaterConfigured === true, () => {
-    void invoke<Components>("component_versions").then(setComponents).catch(error => fail("settings", error));
-    // A runtime update is only visible to a fresh supervised process.
-    requestSessionRestart();
-  }, native);
   const updater = useDesktopUpdate(components?.desktopUpdaterConfigured === true);
   const gitBash = useGitBash();
   const runtime = useComponent<RuntimeReport>("runtime_report");
@@ -319,12 +312,6 @@ export function App() {
     subscription.then(unlisten => { if (disposed) unlisten(); }).catch(error => quiet(error));
     return () => { disposed = true; subscription.then(unlisten => unlisten()).catch(() => {}); };
   }, [settingsOpen]);
-  // Only a runtime update needs new session processes; configuration changes
-  // reach new sessions through the host's warm runtime (live ones wait for G2).
-  function requestSessionRestart() {
-    if (chatBusy) setRestartPending(true);
-    else setSessionRevision(value => value + 1);
-  }
   /** The prepare screen: one automatic install, no choices. */
   async function runPrepare() {
     setPrepare({ phase: "start", downloaded: 0, total: null, error: null });
@@ -360,8 +347,8 @@ export function App() {
     await openUrl(url.href);
   }
   function openUpdatePanel() {
-    // A waiting update is not a question to re-ask: the header opens the System list on the row that has it.
-    setUpdateFocus(jouzuUpdater.version ? 0 : 1);
+    // A waiting update is not a question to re-ask: the header opens the System list on the one row that has it.
+    setUpdateFocus(updater.version && !updater.downgrade ? 0 : null);
     setSettingsTab("system");
     setSettingsOpen(true);
   }
@@ -469,9 +456,6 @@ export function App() {
     // refreshModelCatalog is stable for this purpose and self-gates with catalogAttempted.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [setup?.account.signedIn]);
-  useEffect(() => {
-    if (restartPending && !chatBusy) { setRestartPending(false); setSessionRevision(value => value + 1); }
-  }, [restartPending, chatBusy]);
   async function repairConsole(): Promise<boolean> {
     setRepair({ error: null });
     try { await invoke("terminal_install"); setRepair(null); return true; }
@@ -690,25 +674,25 @@ export function App() {
                 {native && <TabsContent value="web-access" className="m-0 space-y-4"><WebAccessSection locale={locale} openUrl={async url => { const target = new URL(url); if (target.protocol !== "http:" || target.hostname !== "127.0.0.1" || target.pathname !== "/pair" || target.username || target.password) throw new Error("Unexpected web access link"); await openUrl(target.href); }} confirm={message => confirm(message, { title: webAccessTitle(locale), kind: "warning" })} /></TabsContent>}
                 <TabsContent value="system" className="m-0 space-y-4">
                   
-                  <UpdatePreview locale={locale} focusIndex={updateFocus} live={{
-                    phases:[jouzuUpdater.phase === 'preparing' || jouzuUpdater.phase === 'verifying' || jouzuUpdater.phase === 'activating' || jouzuUpdater.phase === 'staged' ? 'installing' : jouzuUpdater.phase as 'idle'|'checking'|'available'|'current'|'downloading'|'installing'|'complete'|'error', updater.phase],
-                    versions:[components?.jouzu ?? t.unavailable, version ? (components?.commit && components.commit !== 'unknown' ? `${version} · ${components.commit} · ${components.build ?? ''}` : version) : t.unavailable],
-                    targets:[jouzuUpdater.version,updater.version],
-                    progress:jouzuUpdater.busy?jouzuUpdater.progress:updater.progress,
-                    configured:[!!components?.jouzuUpdaterConfigured,!!components?.desktopUpdaterConfigured],
-                    errors:[jouzuUpdater.error,updater.error],
-                    notes:[jouzuUpdater.notes ?? '',updater.notes ?? ''],
-                    sources:[jouzuUpdater.notesSource ?? '', ''],
-                    channel: updater.channel && components?.desktopUpdaterConfigured ? { value: updater.channel, set: value => void updater.setChannel(value), downgrade: updater.downgrade } : undefined,
-                    repair: components?.jouzu || import.meta.env.DEV ? undefined : { label: recoveryText[locale].action, run: () => { void (async () => {
+                  <UpdatePreview locale={locale} focusIndex={updateFocus} runtime={{ version: components?.jouzu ?? null, broken: !components?.jouzu || runtime.state?.nodeCurrent === false }} live={{
+                    version,
+                    stamp: components?.commit && components.commit !== 'unknown' ? [components.commit, components.build].filter(Boolean).join(' · ') : components?.build ?? null,
+                    phase: updater.phase,
+                    target: updater.version,
+                    downgrade: updater.downgrade,
+                    notes: updater.notes,
+                    progress: updater.progress,
+                    error: updater.error,
+                    configured: !!components?.desktopUpdaterConfigured,
+                    channel: updater.channel && components?.desktopUpdaterConfigured ? { value: updater.channel, set: value => void updater.setChannel(value) } : undefined,
+                    check:()=>void updater.refresh(),
+                    install:()=>void updater.install()
+                  }} repair={components?.jouzu || import.meta.env.DEV ? undefined : { label: recoveryText[locale].action, run: () => { void (async () => {
                       if (!await confirm(recoveryText[locale].description, {title: recoveryText[locale].title, kind: "warning"})) return;
                       setOperation("saving"); setError(null);
                       try { await invoke("repair_jouzu"); setComponents(await invoke<Components>("component_versions")); await refresh(); await refreshDiagnostics(); }
                       catch (failure) { fail("settings", failure); } finally { setOperation(null); }
-                    })(); } },
-                    check:()=>{void jouzuUpdater.check();void updater.refresh();},
-                    install:index=>{if(index===0)void jouzuUpdater.install();else void updater.install();}
-                  }}/>
+                    })(); } }} />
                   {state?.platform === "windows" && <div className="rounded-lg border border-border"><GitBashSection locale={locale} api={gitBash} /><TerminalSection locale={locale} /><CommandEntrySection locale={locale} /></div>}
                   {diagnostics !== null && diagnostics.crashes.length > 0 && <Card className="border-border shadow-none">
                     <CardHeader><CardTitle>{t.crashTitle}</CardTitle><CardDescription>{t.crashHint}</CardDescription></CardHeader>
@@ -785,8 +769,8 @@ export function App() {
 
         onSettings={() => setSettingsOpen(true)}
         onUpdate={openUpdatePanel}
-        updateAvailable={!!(updater.version || jouzuUpdater.version)}
-        updateBusy={updater.busy || jouzuUpdater.busy}
+        updateAvailable={!!(updater.version && !updater.downgrade)}
+        updateBusy={updater.busy}
       />
     </div>}
     {!activePath && <PageFrame title={t.heading} description={t.intro}>

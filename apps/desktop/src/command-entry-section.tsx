@@ -28,25 +28,24 @@ export function CommandEntrySection({ locale }: { locale: Locale }) {
   // not run is repaired rather than installed again.
   const provided = state.commands.some(entry => entry.path && !within(entry.path, state.directory));
   const installed = state.shims && (state.first || (state.onPath && !provided));
-  const install = !state.shims
-    ? () => void run(() => invoke<CommandEntryState>('command_entry_repair'))
-    : () => void run(async () => {
-        if (provided && !await confirm(t.commandEntryConfirm, { kind: 'warning' })) return state;
-        return invoke<CommandEntryState>('command_entry_use');
-      });
-  // One action, and which one it is follows the state: the file that does not answer is repaired, a
-  // command that is not the one answering is installed, and an answer of Jouzu's is given back.
+  const install = () => void run(async () => {
+    if (provided && !await confirm(t.commandEntryConfirm, { kind: 'warning' })) return state;
+    return invoke<CommandEntryState>('command_entry_use');
+  });
+  // One action, and which one it is follows the state: the file that does not answer is
+  // repaired, a command that is not the one answering is installed. A command that
+  // already answers is in use, so the slot is empty (ui-layer §6.3).
   const action = !state.shims
     ? { label: t.commandEntryRepair, run: () => void run(() => invoke<CommandEntryState>('command_entry_repair')) }
     : installed
-      ? { label: t.commandEntryRemove, run: () => void run(() => invoke<CommandEntryState>('command_entry_remove')) }
+      ? null
       : { label: t.commandEntryInstall, run: install };
   return <ComponentSection
     title={t.commandEntry}
     status={!state.shims ? t.commandEntryBroken : installed ? t.commandEntryOn : t.gitBashMissing}
     tone={state.shims ? 'ok' : 'missing'}
     busy={busy} error={error}
-    install={action.run}
-    installLabel={action.label}
+    install={action?.run}
+    installLabel={action?.label ?? t.commandEntryInstall}
   />;
 }
