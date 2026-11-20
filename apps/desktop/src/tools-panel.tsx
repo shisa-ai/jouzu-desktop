@@ -108,9 +108,9 @@ export function ImageMissingNotice({ providers, connected = [], onModelProviders
   const otherConnected = [...new Set(connected.filter(item => !providers.some(provider => provider.id === item.id)).map(item => item.name))];
   const candidates = [...new Set(providers.map(provider => provider.label))];
   const line = otherConnected.length
-    ? fill(t.imageConnectedCannot, { connected: otherConnected.join(", "), providers: candidates.join(", ") || t.modelProviders })
+    ? fill(t.imageConnectedCannot, { connected: otherConnected.join(", "), providers: candidates.join(t.imageProviderOr) || t.modelProviders })
     : candidates.length
-      ? fill(t.imageConnectProviders, { providers: candidates.join(", ") })
+      ? fill(t.imageConnectProviders, { providers: candidates.join(t.imageProviderOr) })
       : t.imageConnectAnyProvider;
   return <>
     <p role="status" data-image-no-provider className="text-sm text-muted-foreground">{line}</p>
