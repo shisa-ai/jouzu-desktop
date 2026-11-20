@@ -1,6 +1,6 @@
 # UI layer: what the person sees and can do
 
-Status: draft (2026-11-16), for discussion. Baseline: 1.1.3-rc.2. Part of a
+Status: draft (2026-11-16; Settings cards 2026-11-20), for discussion. Baseline: 1.1.3-rc.2. Part of a
 three-layer design: [runtime](runtime-layer.md), [host](host-layer.md) and
 **UI** (this document).
 
@@ -89,6 +89,58 @@ ever appears in the composer's place, and only one at a time.
   short reason under the action that failed. Other cards keep working.
 - **Several actions in a row**: each button shows its own progress while it waits
   its turn; nothing fails because another action is running.
+
+Each Settings card is drawn from one state. The card is designed for that state
+as a whole; a host field is not a line of its own, and a fact appears once per
+card. The tables below are the complete list of what each card shows.
+
+### 6.1 Tools → Image generation
+
+The state comes from the image settings (saved) and the providers the runtime
+reports, each usable or with a reason code (`no-credential`, `no-credit`,
+`unreachable`, …).
+
+| State | The card shows | It does not show |
+|---|---|---|
+| Loading | Title and one waiting line | Any control |
+| Image tool not installed | Title and one line: "The image tool is not installed yet." | Provider, model, size, count, the switch |
+| No usable provider | Title, one line why, and the one action that fixes it. One shared reason: one line (for example "Image generation needs a signed-in image provider.") and **Model providers**. Different reasons: one line per provider, each with its own action | Provider, model, size, count selects; the switch as on. The saved settings are not changed |
+| At least one usable provider | The switch, then provider, model, size (only when the provider takes one) and images per call. Providers that cannot be used are not in the list; one short line under it names them and why (one line per provider) | "No models", "No image provider available" or any other empty-select text |
+| Switch off | The switch; the selects stay visible but disabled, so turning it on does not move anything | — |
+
+### 6.2 System → Jouzu Desktop
+
+This is one row: the product the person installed. The runtime is part of it,
+not a second product.
+
+- **Always**: "Jouzu Desktop", the version, and one state on the right. Under the
+  version, one quiet detail line: "Runtime 0.2.5". The commit and build stamp are
+  a tooltip on the version, not a line.
+- **The runtime has no update row and no update text.** Desktop installs the
+  runtime at a pinned version ([0003](../decisions/0003-no-bundled-runtime.md));
+  a new runtime arrives with a new Desktop release. The separate runtime updater
+  (`jouzu-update.json`) is only configured by the removed Launcher packaging, so
+  its row and hook are removed with #168. When the runtime files are missing
+  or do not start, the detail line says so and the row's one action is
+  **Repair**.
+
+| Desktop state | Right side | Under the version | Sidebar update mark |
+|---|---|---|---|
+| Checking | Spinner, "Checking…" | — | No change |
+| Up to date | "Up to date" | Channel select | No |
+| A newer version on this channel | **Update and restart** (primary) and "Update available" tag | "What's new" for the new version; channel select | Yes |
+| This build is newer than the channel's latest (a QA build on Stable) | "This is a test build" | A plain button "Install Stable 1.0.23 (older)", whose confirmation says it installs an older version; channel select. No "What's new" | No |
+| Downloading / installing | Progress | — | Yes |
+| Check or install failed | One reason line with Details, and Retry | Channel select | No |
+| Online updates not configured (development build) | Nothing | — | No |
+
+### 6.3 System → components (Git Bash, terminal, command entry)
+
+Each component row shows one state: checking, in use (which copy and its
+version), missing, or broken. The action slot keeps its size so nothing moves,
+but it shows a button only when an action applies: **Install** when missing,
+**Repair** when broken. While checking, and while a copy is in use, the slot is
+empty. A disabled button for an action that does not apply is not shown.
 
 ## 7. Start page and MCP
 
