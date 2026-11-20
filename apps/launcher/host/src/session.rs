@@ -6410,7 +6410,17 @@ impl SessionManager {
             "appVersion": app_version,
             "node": managed_node_path(&self.home).is_file(),
             "app": self.home.join("app").join("bootstrap.mjs").is_file(),
-            "bash": self.home.join("runtime").join("git").join("bin").join("bash.exe").is_file(),
+            // The bash sessions start with: the one given to the host, else the
+            // same lookup each spawn makes (bundled Git Bash on Windows, the
+            // system bash on macOS and Linux).
+            "bash": self
+                .config
+                .get()
+                .and_then(|config| config.bash.clone())
+                .or_else(|| self.managed.as_ref().and_then(|managed| managed.bash.clone()))
+                .filter(|bash| bash.is_file())
+                .or_else(|| find_bash(&self.home))
+                .is_some(),
             "git": self.home.join("runtime").join("git").exists(),
             "terminal": self.home.join("runtime").join("terminal").exists(),
             "warmRuntime": self.warm_runtime().map(|pool| pool.status()),
