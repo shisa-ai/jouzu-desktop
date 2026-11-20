@@ -21,7 +21,9 @@ test("the Tools page follows the interface language", async ({ page }) => {
   await dialog.getByRole("tab", { name: "ツール", exact: true }).click();
   const panel = dialog.getByRole("tabpanel");
   await expect(panel.getByText("画像生成", { exact: true })).toBeVisible();
-  await expect(panel.getByLabel("画像プロバイダー", { exact: true })).toHaveValue("shisa");
+  // One provider that can work is named, not offered as a one-option select.
+  await expect(panel.getByText("Shisa.AI", { exact: true })).toBeVisible();
+  await expect(panel.getByLabel("画像モデル", { exact: true })).toHaveValue("gemini-3-pro-image");
   await expect(panel.getByText("確認が必要な呼び出し：generate_image")).toBeVisible();
   // Nothing in the panel is English of its own (names and values are not translated).
   const words = (await panel.innerText()).replace(/generate_image|Shisa\.AI|gemini-3-pro-image|\b1K\b/gu, "");

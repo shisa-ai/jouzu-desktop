@@ -70,15 +70,14 @@ for (const legacy of [false,true]) {
 }
 
 const updateStub = (config: {
-  jouzuVersion: string; jouzuTarget: string; jouzuNotes?: string;
-  desktopVersion: string; desktopTarget?: string; desktopAvailable: boolean;
-  configured: [boolean, boolean]; failInstall?: boolean; desktopCheckFails?: boolean;
+  version: string; target?: string; available: boolean; downgrade?: boolean; notes?: string;
+  configured?: boolean; checkFails?: boolean; installFails?: boolean;
+  runtime?: string | null; commit?: string; build?: string;
 }) => {
   const callbacks: Record<number, Function> = {};
   const listeners: Record<string, number[]> = {};
   let next = 1;
   (window as any).isTauri = true;
-  (window as any).__confirms = 0;
   (window as any).__installs = 0;
   (window as any).__logs = [];
   (window as any).__emit = (event: string, payload: any) => (listeners[event] ?? []).forEach(id => callbacks[id]({event, id, payload}));
@@ -92,30 +91,32 @@ const updateStub = (config: {
       if (command === 'plugin:event|unlisten' || command === 'plugin:event|emit') return null;
       if (command === 'shell_state') return { ready: true, bash: true, recent: [], platform: 'windows' };
       if (command === 'component_versions') return {
-        jouzu: config.jouzuVersion, desktop: config.desktopVersion, development: true,
-        jouzuUpdaterConfigured: config.configured[0], desktopUpdaterConfigured: config.configured[1],
+        jouzu: config.runtime === undefined ? '0.2.5' : config.runtime,
+        development: false,
+        desktopUpdaterConfigured: config.configured !== false,
+        build: config.build,
+        commit: config.commit,
       };
+      if (command === 'runtime_report') return { version: config.runtime ?? null, nodeCurrent: true };
       if (command === 'control_request') return { schemaVersion: 1, profile: 'core', account: { signedIn: false }, credentials: [], customProviders: [], providers: [] };
       if (command === 'environment_read') return [];
-      if (command === 'git_bash' || command === 'terminal') return 1;
+      if (command === 'git_bash' || command === 'terminal' || command === 'command_entry_report') return 1;
       if (command === 'plugin:dialog|confirm' || command === 'plugin:dialog|message') return true;
-      if (command === 'jouzu_update') {
-        if (args.action === 'check') return { version: config.jouzuTarget, available: true, notes: config.jouzuNotes ?? '', notesSource: 'Jouzu ' + config.jouzuTarget };
-        (window as any).__installs++;
-        if (config.failInstall && (window as any).__installs === 1) throw new Error('Download failed. Your current version is unchanged.');
-        return new Promise(resolve => { (window as any).__finishInstall = () => resolve({ version: config.jouzuTarget, available: false }); });
-      }
       if (command === 'log_event') { (window as any).__logs.push(args.message); return null; }
       // The app's own update commands (src-tauri update_channel.rs), which pick the feed by channel.
       if (command === 'update_channel' || command === 'update_channel_set') return args?.channel ?? 'stable';
       if (command === 'update_check') {
-        if (config.desktopCheckFails) throw new Error('network');
-        return config.desktopAvailable
-        ? { version: config.desktopTarget, notes: 'Desktop only', channel: 'stable', downgrade: false }
-        : null;
+        if (config.checkFails) throw new Error('network');
+        return config.available
+          ? { version: config.target, notes: config.notes ?? null, channel: 'stable', downgrade: !!config.downgrade }
+          : null;
       }
-      if (command === 'update_install') return new Promise(() => {});
-      if (command.includes('version')) return config.desktopVersion;
+      if (command === 'update_install') {
+        (window as any).__installs++;
+        if (config.installFails && (window as any).__installs === 1) throw new Error('Download failed. Your current version is unchanged.');
+        return new Promise(() => {});
+      }
+      if (command.includes('version')) return config.version;
       return 1;
     },
   };
@@ -129,78 +130,104 @@ async function openSystem(page: any) {
   return dialog;
 }
 
-test('the System section shows both update rows with their state and notes', async ({ page }) => {
+test('the System section shows one Jouzu Desktop row, with the runtime as a detail', async ({ page }) => {
   await page.addInitScript(updateStub, {
-    jouzuVersion: '0.1.17', jouzuTarget: '0.1.18',
-    jouzuNotes: '### Release notes\n- Git Bash is prepared during installation.\n- Startup no longer fails after an update.',
-    desktopVersion: '0.1.20', desktopAvailable: false, configured: [true, true],
+    version: '1.1.4-rc.1', available: false, commit: '81d7bae9a5b9', build: '20261119T095741798Z-292c4003',
   });
   const dialog = await openSystem(page);
-  const jouzu = dialog.locator('section[aria-label="Jouzu"]');
-  await expect(jouzu.getByText('0.1.17')).toBeVisible();
-  await expect(jouzu.getByText('0.1.18').first()).toBeVisible();
-  // Notes live in a bounded, scrollable area rather than a clipped box.
-  const notes = jouzu.locator('div.max-h-40');
-  await expect(notes).toHaveClass(/overflow-auto/);
-  expect(await notes.evaluate((node: HTMLElement) => node.scrollHeight >= node.clientHeight)).toBe(true);
-  const desktop = dialog.locator('section[aria-label="Jouzu Desktop"]');
-  await expect(desktop.getByText('0.1.20')).toBeVisible();
-  await expect(desktop.getByRole('button')).toHaveCount(0);
-  // The check's outcome reaches the log, because the interface is where that check runs.
+  const row = dialog.locator('section[aria-label="Jouzu Desktop"]');
+  await expect(row).toHaveCount(1);
+  await expect(dialog.locator('section[aria-label="Jouzu"]')).toHaveCount(0);
+  await expect(row.getByText('1.1.4-rc.1')).toBeVisible();
+  await expect(row.getByText('Runtime 0.2.5')).toBeVisible();
+  await expect(row.getByText('Up to date')).toBeVisible();
+  // The commit and build stamp live in a tooltip, not on a line of their own.
+  await expect(row.getByText('81d7bae9a5b9')).toHaveCount(0);
+  await expect(row.getByText('20261119T095741798Z-292c4003')).toHaveCount(0);
+  await expect(row.getByTitle(/81d7bae9a5b9/)).toHaveAttribute('title', /20261119T095741798Z-292c4003/);
+  await expect(row.getByText('Update available')).toHaveCount(0);
+  await expect(row.getByText('Online updates are unavailable')).toHaveCount(0);
   expect(await page.evaluate(() => (window as any).__logs)).toContain('desktop update check result=current');
 });
 
 test('a failed update check is reported and recorded', async ({ page }) => {
-  await page.addInitScript(updateStub, {
-    jouzuVersion: '0.1.17', jouzuTarget: '0.1.18', desktopVersion: '0.1.20',
-    desktopAvailable: false, configured: [true, true], desktopCheckFails: true,
-  });
+  await page.addInitScript(updateStub, { version: '1.1.4-rc.1', available: false, checkFails: true });
   const dialog = await openSystem(page);
-  const desktop = dialog.locator('section[aria-label="Jouzu Desktop"]');
-  await expectError(desktop.getByRole('alert'), 'Could not check for updates', 'network');
+  const row = dialog.locator('section[aria-label="Jouzu Desktop"]');
+  await expectError(row.getByRole('alert'), 'Could not check for updates', 'network');
   const logs: string[] = await page.evaluate(() => (window as any).__logs);
   expect(logs.some(line => line.startsWith('desktop update check failed error='))).toBe(true);
 });
 
-test('installing a Jouzu update reports progress and needs no further confirmation', async ({ page }) => {
+test('a newer build offers Update and restart with its notes, and confirms once', async ({ page }) => {
   await page.addInitScript(updateStub, {
-    jouzuVersion: '0.1.17', jouzuTarget: '0.1.18', desktopVersion: '0.1.20', desktopAvailable: false, configured: [true, true],
+    version: '1.1.4-rc.1', target: '1.1.5', available: true,
+    notes: '### Release notes\n- Git Bash is prepared during installation.\n- Startup no longer fails after an update.',
   });
   const dialog = await openSystem(page);
-  const jouzu = dialog.locator('section[aria-label="Jouzu"]');
-  await jouzu.getByRole('button', { name: 'Update Jouzu', exact: true }).click();
-  await page.evaluate(() => (window as any).__emit('jouzu-update-progress', { phase: 'downloading', downloaded: 5, total: 10 }));
-  await expect(jouzu.getByRole('progressbar')).toBeVisible();
-  await page.evaluate(() => (window as any).__emit('jouzu-update-progress', { phase: 'installing' }));
-  await expect(jouzu.getByRole('progressbar')).toBeVisible();
-  await page.waitForFunction(() => typeof (window as any).__finishInstall === 'function');
-  await page.evaluate(() => (window as any).__finishInstall());
-  await expect(jouzu.getByRole('button')).toHaveCount(0);
-  await expect(jouzu.getByRole('button', { name: 'Update Jouzu', exact: true })).toHaveCount(0);
-  expect(await page.evaluate(() => (window as any).__confirms)).toBe(0);
+  const row = dialog.locator('section[aria-label="Jouzu Desktop"]');
+  await expect(row.getByText('Update available', { exact: true })).toBeVisible();
+  // Notes live in a bounded, scrollable area rather than a clipped box.
+  const notes = row.locator('div.max-h-40');
+  await expect(notes).toHaveClass(/overflow-auto/);
+  expect(await notes.evaluate((node: HTMLElement) => node.scrollHeight >= node.clientHeight)).toBe(true);
+  await row.getByRole('button', { name: 'Update and restart', exact: true }).click();
+  const confirm = page.getByRole('dialog').last();
+  await expect(confirm.getByText('Jouzu Desktop restarts after updating.')).toBeVisible();
+  await confirm.getByRole('button', { name: 'Update and restart', exact: true }).click();
   expect(await page.evaluate(() => (window as any).__installs)).toBe(1);
 });
 
-test('a failed install offers Retry and the Jouzu Desktop update confirms once', async ({ page }) => {
+test('installing reports progress', async ({ page }) => {
+  await page.addInitScript(updateStub, { version: '1.1.4-rc.1', target: '1.1.5', available: true });
+  const dialog = await openSystem(page);
+  const row = dialog.locator('section[aria-label="Jouzu Desktop"]');
+  await row.getByRole('button', { name: 'Update and restart', exact: true }).click();
+  await page.getByRole('dialog').last().getByRole('button', { name: 'Update and restart', exact: true }).click();
+  await page.evaluate(() => (window as any).__emit('desktop-update-progress', { downloaded: 5, total: 10 }));
+  await expect(row.getByRole('progressbar')).toBeVisible();
+});
+
+test('an older build on the channel is a test build, not an update (#176)', async ({ page }) => {
   await page.addInitScript(updateStub, {
-    jouzuVersion: '0.1.17', jouzuTarget: '0.1.18', desktopVersion: '0.1.20', desktopTarget: '0.1.21',
-    desktopAvailable: true, configured: [true, true], failInstall: true,
+    version: '1.1.4-rc.1', target: '1.0.23', available: true, downgrade: true,
+    notes: '### Notes this build already has\n- Old change.',
   });
   const dialog = await openSystem(page);
-  const jouzu = dialog.locator('section[aria-label="Jouzu"]');
-  await jouzu.getByRole('button', { name: 'Update Jouzu', exact: true }).click();
-  await expectError(jouzu.getByRole('alert'), 'Could not install the update', 'Your current version is unchanged');
-  // Retrying the same row installs without asking again.
-  await jouzu.getByRole('button', { name: 'Retry', exact: true }).click();
-  await page.waitForFunction(() => typeof (window as any).__finishInstall === 'function');
-  await page.evaluate(() => (window as any).__finishInstall());
-  await expect(jouzu.getByRole('button')).toHaveCount(0);
-  expect(await page.evaluate(() => (window as any).__confirms)).toBe(0);
-  // The app asks once before it restarts.
-  const desktop = dialog.locator('section[aria-label="Jouzu Desktop"]');
-  await desktop.getByRole('button', { name: 'Update and restart', exact: true }).click();
-  await expect(page.getByRole('dialog')).toBeVisible();
-  expect(await page.evaluate(() => (window as any).__confirms)).toBe(0);
+  const row = dialog.locator('section[aria-label="Jouzu Desktop"]');
+  await expect(row.getByText('This is a test build')).toBeVisible();
+  const install = row.getByRole('button', { name: 'Install Stable 1.0.23 (older)', exact: true });
+  await expect(install).toBeVisible();
+  await expect(install).toHaveClass(/border/);
+  await expect(row.getByText('Update available')).toHaveCount(0);
+  await expect(row.getByRole('button', { name: 'Update and restart', exact: true })).toHaveCount(0);
+  await expect(row.getByText("What's new")).toHaveCount(0);
+  await expect(row.getByText('Old change.')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Update available', exact: true })).toHaveCount(0);
+  await install.click();
+  const confirm = page.getByRole('dialog').last();
+  await expect(confirm.getByText('This installs an older version of Jouzu Desktop. Your data stays.')).toBeVisible();
+});
+
+test('a failed install offers Retry and the retry needs no second confirmation', async ({ page }) => {
+  await page.addInitScript(updateStub, { version: '1.1.4-rc.1', target: '1.1.5', available: true, installFails: true });
+  const dialog = await openSystem(page);
+  const row = dialog.locator('section[aria-label="Jouzu Desktop"]');
+  await row.getByRole('button', { name: 'Update and restart', exact: true }).click();
+  await page.getByRole('dialog').last().getByRole('button', { name: 'Update and restart', exact: true }).click();
+  await expectError(row.getByRole('alert'), 'Could not install the update', 'Your current version is unchanged');
+  await row.getByRole('button', { name: 'Retry', exact: true }).click();
+  expect(await page.evaluate(() => (window as any).__installs)).toBe(2);
+});
+
+test('a missing runtime is a detail line with Repair as the row\'s one action', async ({ page }) => {
+  await page.addInitScript(updateStub, { version: '1.1.4-rc.1', target: '1.1.5', available: true, runtime: null });
+  const dialog = await openSystem(page);
+  const row = dialog.locator('section[aria-label="Jouzu Desktop"]');
+  await expect(row.getByText('The runtime is missing.')).toBeVisible();
+  await expect(row.getByRole('button', { name: 'Repair Jouzu', exact: true })).toBeVisible();
+  await expect(row.getByRole('button', { name: 'Update and restart', exact: true })).toHaveCount(0);
+  await expect(row.getByText('Update available')).toHaveCount(0);
 });
 
 test('the System section names the copy in use and offers installing the ones Jouzu ships', async ({page})=>{
@@ -242,13 +269,13 @@ test('the System section names the copy in use and offers installing the ones Jo
  const installBash=bash.getByRole('button',{name:/Install and use Jouzu's Git Bash/});
  await expect(installBash).toBeVisible();
  await installBash.click();
- await expect(bash.getByRole('button',{name:/Install and use Jouzu's Git Bash/})).toBeDisabled();
+ await expect(bash.getByRole('button',{name:/Install and use Jouzu's Git Bash/})).toHaveCount(0);
  // The console host follows the same rule.
  const terminalRow=dialog.locator('section[aria-label="Windows Terminal"]');
  await expect(terminalRow.getByRole('button')).toBeEnabled();
  const installTerminal=terminalRow.getByRole('button',{name:/Install and use Jouzu's Windows Terminal/});
  await installTerminal.click();
- await expect(terminalRow.getByRole('button',{name:/Install and use Jouzu's Windows Terminal/})).toBeDisabled();
+ await expect(terminalRow.getByRole('button',{name:/Install and use Jouzu's Windows Terminal/})).toHaveCount(0);
 });
 test('a component row keeps its height while an action runs', async ({page})=>{
  await page.addInitScript(()=>{
@@ -350,7 +377,6 @@ test('the terminal command row names what answers and takes precedence only when
  await expect(row.getByRole('button')).toBeVisible();
  await row.getByRole('button').click();
  await expect.poll(async ()=> page.evaluate(()=>(window as any).__invoked)).toContain('command_entry_use');
- // Putting the previous one back is offered as its own action.
- await row.getByRole('button').click();
- await expect(row.getByRole('button')).toBeVisible();
+ // Once a command of Jouzu's answers, the slot is empty: no disabled button, no second action.
+ await expect(row.getByRole('button')).toHaveCount(0);
 });
