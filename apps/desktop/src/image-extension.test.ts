@@ -206,7 +206,7 @@ describe("generate_image extension", () => {
   it("marks Shisa unavailable without a credential, with the reason, instead of hiding it", async () => {
     setCredentialReader(async () => undefined);
     const providers = await listProviders(registry());
-    expect(providers).toEqual([{ id: "shisa", label: "Shisa.AI", available: false, code: "no-credential", reason: "Sign in to Shisa.AI or set SHISA_API_KEY to generate images." }]);
+    expect(providers).toEqual([{ id: "shisa", label: "Shisa.AI", available: false, code: "no-credential", reason: "Sign in to Shisa.AI under Model providers to generate images." }]);
   });
 
   it("generates with a runtime provider through the runtime's registry, never its own request", async () => {
@@ -283,7 +283,7 @@ describe("image provider availability", () => {
   it("is unavailable without a credential, and says how to get one", async () => {
     setCredentialReader(async () => undefined);
     const result = await availability(shisa);
-    expect(result).toEqual({ available: false, code: "no-credential", reason: "Sign in to Shisa.AI or set SHISA_API_KEY to generate images." });
+    expect(result).toEqual({ available: false, code: "no-credential", reason: "Sign in to Shisa.AI under Model providers to generate images." });
     expect(fetch).not.toHaveBeenCalled();
   });
 
@@ -328,24 +328,65 @@ describe("image provider availability", () => {
   });
 });
 
-// The Shisa credential follows Jouzu's rule: sign-out, then SHISA_API_KEY, then an unexpired sign-in.
-describe("Shisa credential", () => {
-  const runtime = ({ signedOut = false, login = undefined } = {}) => async () => ({
-    isShisaSignedOut: () => signedOut,
-    readShisaLoginToken: () => login,
+
+// ui-layer §6.1: the agent is offered generate_image only when it can work.
+describe("the agent's tool list", () => {
+  let home = null;
+  beforeEach(() => {
+    setCredentialReader(async () => ({ type: "oauth", access: "test-token" }));
+    setRegistryLoader(async () => registry());
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    if (home) rmSync(home, { recursive: true, force: true });
+    home = null;
+    delete process.env.JOUZU_HOME;
   });
 
-  it("prefers SHISA_API_KEY over a sign-in", async () => {
-    const credential = await shisa.credential({ env: { SHISA_API_KEY: " key " }, agentDir: "a", runtimeModule: runtime({ login: "login" }) });
-    expect(credential).toEqual({ type: "api_key", key: "key" });
+  function piWith(active) {
+    const tools = [];
+    const handlers = new Map();
+    const pi = {
+      registerTool: tool => tools.push(tool),
+      on: (event, handler) => { handlers.set(event, [...(handlers.get(event) ?? []), handler]); },
+      getActiveTools: () => [...active],
+      setActiveTools: next => { active.splice(0, active.length, ...next); },
+    };
+    extension(pi);
+    return { tool: tools[0], handlers, active };
+  }
+
+  it("registers the tool inactive, so it is not declared before a session says it can work", () => {
+    home = homeWith({ image: { enabled: true, provider: "shisa", model: "m1" } });
+    process.env.JOUZU_HOME = home;
+    const { tool } = piWith(["read", "bash"]);
+    expect(tool.defaultActive).toBe(false);
   });
 
-  it("uses the runtime's sign-in token, which is absent once expired", async () => {
-    expect(await shisa.credential({ env: {}, agentDir: "a", runtimeModule: runtime({ login: "login" }) })).toEqual({ type: "oauth", access: "login" });
-    expect(await shisa.credential({ env: {}, agentDir: "a", runtimeModule: runtime() })).toBeUndefined();
+  it("is not added when the saved switch is off", async () => {
+    home = homeWith({ image: { enabled: false, provider: "shisa", model: "m1" } });
+    process.env.JOUZU_HOME = home;
+    const { handlers, active } = piWith(["read", "bash"]);
+    await handlers.get("session_start")[0]({}, {});
+    await vi.waitFor(() => expect(active).toEqual(["read", "bash"]));
   });
 
-  it("has no credential after a local sign-out, even with SHISA_API_KEY", async () => {
-    expect(await shisa.credential({ env: { SHISA_API_KEY: "key" }, agentDir: "a", runtimeModule: runtime({ signedOut: true, login: "login" }) })).toBeUndefined();
+  it("is not added when no provider can make images", async () => {
+    home = homeWith({ image: { enabled: true, provider: "shisa", model: "m1" } });
+    process.env.JOUZU_HOME = home;
+    setCredentialReader(async () => undefined);
+    const { handlers, active } = piWith(["read", "bash"]);
+    await handlers.get("session_start")[0]({}, {});
+    await vi.waitFor(() => expect(active).toEqual(["read", "bash"]));
+  });
+
+  it("is added beside the other tools when the switch is on and a provider can make images", async () => {
+    home = homeWith({ image: { enabled: true, provider: "shisa", model: "m1" } });
+    process.env.JOUZU_HOME = home;
+    setCredentialReader(async () => ({ type: "oauth", access: "t" }));
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(ok({ models: [{ name: "models/gemini-3.1-flash-image" }] })));
+    const { handlers, active } = piWith(["read", "bash"]);
+    await handlers.get("session_start")[0]({}, {});
+    await vi.waitFor(() => expect(active).toEqual(["read", "bash", "generate_image"]));
   });
 });

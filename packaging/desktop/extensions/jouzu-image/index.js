@@ -91,18 +91,14 @@ async function runtimeModule(relative) {
 }
 
 /**
- * The provider's credential, read the way the runtime reads it. A provider that
- * knows its runtime's rule (Shisa: SHISA_API_KEY, then an unexpired sign-in)
- * resolves it itself; any other provider uses the runtime's stored credential.
- * Injectable so the tests do not need the runtime.
+ * The provider's credential, read the way the runtime reads it for chat. The
+ * image tool has no credential of its own: a provider connected under Model
+ * providers is connected here too (#96). Injectable so the tests do not need
+ * the runtime.
  */
 let credentialReader = async providerId => {
   // The runtime sets PI_CODING_AGENT_DIR; the CLI mode sets it from JOUZU_HOME.
   process.env.PI_CODING_AGENT_DIR ||= join(home(), "agent");
-  const provider = OWN_PROVIDERS[providerId];
-  if (provider?.credential) {
-    return provider.credential({ env: process.env, agentDir: process.env.PI_CODING_AGENT_DIR, runtimeModule });
-  }
   const { readStoredCredential } = await runtimeModule("@earendil-works/pi-coding-agent/dist/index.js");
   return readStoredCredential(providerId);
 };
@@ -289,6 +285,35 @@ export async function generate({ provider: requested, model, size, prompt, count
   return { provider: provider.id, model: chosenModel, size: chosenSize, images: saved };
 }
 
+/**
+ * Whether the agent may be offered the tool. The saved switch is the person's
+ * decision; a provider that can make images is the tool's ability to run. A
+ * tool that can only fail is not offered (ui-layer §6.1).
+ */
+export function usable(providers) {
+  return Array.isArray(providers) && providers.some(provider => provider.available);
+}
+
+/** Adds or removes generate_image from the active set without disturbing other tools. */
+export function setGenerateActive(pi, on) {
+  if (typeof pi.getActiveTools !== "function" || typeof pi.setActiveTools !== "function") return;
+  const active = pi.getActiveTools();
+  const next = on ? [...new Set([...active, "generate_image"])] : active.filter(name => name !== "generate_image");
+  const changed = next.length !== active.length || next.some((name, index) => name !== active[index]);
+  if (changed) pi.setActiveTools(next);
+}
+
+/** Reads the saved switch and the provider list once, then offers the tool only when both allow it. */
+async function syncTool(pi, ctx) {
+  try {
+    const current = await settings();
+    if (!current.image.enabled) return setGenerateActive(pi, false);
+    setGenerateActive(pi, usable(await listProviders(await registryFor(ctx))));
+  } catch {
+    setGenerateActive(pi, false);
+  }
+}
+
 export default function jouzuImage(pi) {
   const approved = new Set();
   let sessionId = "";
@@ -296,6 +321,7 @@ export default function jouzuImage(pi) {
   pi.on("session_start", (_event, ctx) => {
     approved.clear();
     try { sessionId = ctx?.sessionManager?.getSessionId?.() ?? ""; } catch { sessionId = ""; }
+    void syncTool(pi, ctx);
   });
 
   pi.on("tool_call", async (event, ctx) => {
@@ -326,6 +352,8 @@ export default function jouzuImage(pi) {
       "The user reviews this call before it runs; do not ask for approval in the message.",
       "Each image is stored as an artifact and its path is returned.",
     ],
+    // Off until the session confirms the saved switch and a provider that can make images.
+    defaultActive: false,
     parameters: {
       type: "object",
       properties: {
