@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { ArrowUpCircle, ArrowUpDown, Archive, ArchiveRestore, Check, ChevronDown, ChevronRight, Copy, FolderOpen, FolderPlus, Images, MessageSquare, MoreHorizontal, PanelLeft, Columns2, PanelRight, Pencil, Pin, Plus, RefreshCw, Search, Settings, Sparkles, X } from "lucide-react";
 import { Button } from "./components/ui/button";
 import { Input } from "./components/ui/input";
+import { AssistantWorkspace } from "./assistant-workspace";
 import { McpMenu } from "./mcp-menu";
 import { ChatConversation } from "./chat-conversation";
 import { AgentAction, turnLabel } from "./chat-live";
@@ -1147,7 +1148,9 @@ export function ChatWorkspace({ path, revision = 0, newSession = true, locked = 
   // A cancel token is sent with the clientMessageId, so Stop can be offered as
   // soon as the local outbox exists.
   const composerStarting = (snapshot.pending || !!localSubmitted) && !composerRunning;
-  const [appView, setAppView] = useState<"chat" | "artifacts">("chat");
+  const [appView, setAppView] = useState<"chat" | "assistant" | "artifacts">("chat");
+  const [assistantOpened, setAssistantOpened] = useState(false);
+  useEffect(() => { if (appView === "chat") connection.current?.view(); }, [appView]);
   const [artifactCounts, setArtifactCounts] = useState<Record<string, number>>({});
   const [panes, setPanes] = useState<Array<{ tabs: string[]; active: string; width: number }>>([]);
   const resizingPane = useRef<{ index: number; startX: number; startWidth: number } | null>(null);
@@ -1367,7 +1370,8 @@ export function ChatWorkspace({ path, revision = 0, newSession = true, locked = 
   return <div ref={chatRoot} className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden">
     {dropActive && <div className="pointer-events-none absolute inset-0 z-40 flex items-center justify-center border-2 border-dashed border-primary bg-background/85 text-sm font-medium text-primary">Drop images or files</div>}
     {sidebar && <aside aria-label="Workspaces" className="absolute inset-y-0 left-0 z-20 flex w-80 max-w-[85%] flex-col border-r border-border bg-background shadow-xl md:static md:z-auto md:shadow-none">
-      <div className="flex items-center gap-2 px-2 pb-2 pt-3"><Button className="min-w-0 flex-1 justify-start gap-2" disabled={locked} onClick={() => void startNewSession()}><Plus className="size-4" />New session</Button><Button variant="ghost" className="size-8 p-0 md:hidden" aria-label="Hide workspaces" onClick={() => setSidebar(false)}><X className="size-4" /></Button></div>
+      <div className="flex items-center gap-2 px-2 pb-2 pt-3"><Button variant={appView === "chat" ? "default" : "ghost"} aria-pressed={appView === "chat"} className="min-w-0 flex-1 justify-start gap-2" disabled={locked} onClick={() => void startNewSession()}><Plus className="size-4" />New session</Button><Button variant="ghost" className="size-8 p-0 md:hidden" aria-label="Hide workspaces" onClick={() => setSidebar(false)}><X className="size-4" /></Button></div>
+      <div className="px-2 pb-2"><Button variant={appView === "assistant" ? "default" : "ghost"} className="w-full justify-start gap-2" disabled={locked} aria-pressed={appView === "assistant"} onClick={() => { setAssistantOpened(true); setAppView("assistant"); }}><Sparkles className="size-4" />Assistant</Button></div>
       <div className="px-2 pb-2"><Button variant={appView === "artifacts" ? "default" : "ghost"} className="w-full justify-start gap-2" aria-pressed={appView === "artifacts"} onClick={() => setAppView(appView === "artifacts" ? "chat" : "artifacts")}><Images className="size-4" />Artifacts</Button></div>
       <div className="flex items-center justify-between border-t border-border px-3 py-2">
         <h2 className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Workspaces</h2>
@@ -1424,7 +1428,11 @@ export function ChatWorkspace({ path, revision = 0, newSession = true, locked = 
         </div>
       </div>
     </aside>}
-    <section className={appView === "artifacts" ? "hidden" : "flex min-h-0 min-w-0 flex-1 flex-col"}>
+    {assistantOpened && <section aria-label="Assistant session" className={appView === "assistant" ? "flex min-h-0 min-w-0 flex-1 flex-col" : "hidden"}>
+      <div className="flex items-center px-2 py-1.5"><Button variant="ghost" className="size-8 shrink-0 p-0" aria-label={sidebar ? "Hide workspaces" : "Show workspaces"} title="Workspaces" aria-expanded={sidebar} onClick={() => setSidebar(value => !value)}><PanelLeft className="size-4" /></Button></div>
+      <AssistantWorkspace />
+    </section>}
+    <section className={appView !== "chat" ? "hidden" : "flex min-h-0 min-w-0 flex-1 flex-col"}>
       {hero ? <div className="flex items-center px-2 py-1.5"><Button variant="ghost" className="size-8 shrink-0 p-0" aria-label={sidebar ? "Hide workspaces" : "Show workspaces"} title="Workspaces" aria-expanded={sidebar} onClick={() => setSidebar(value => !value)}><PanelLeft className="size-4" /></Button></div> : <div className="flex items-center gap-2 border-b border-border px-2 py-2 sm:px-3">
         <Button variant="ghost" className="size-8 shrink-0 p-0" aria-label={sidebar ? "Hide workspaces" : "Show workspaces"} title="Workspaces" aria-expanded={sidebar} onClick={() => setSidebar(value => !value)}><PanelLeft className="size-4" /></Button>
         <div className="flex min-w-0 flex-1 items-center gap-2">

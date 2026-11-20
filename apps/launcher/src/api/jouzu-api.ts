@@ -185,9 +185,19 @@ export interface EnvironmentEntry {
   enabled: boolean;
 }
 
+export interface AssistantSnapshot {
+  projects: { id: string; name: string; description: string; workspaceIds: string[]; sessionIds: string[] }[];
+  messages: { role: "user" | "assistant"; text: string }[];
+  workspaces: Workspace[];
+  sessions: Record<string, unknown>[];
+}
+
 export interface SessionApi {
   list(): Promise<SessionSummary[]>;
   attach(workspacePath: string, sessionPath?: string): Promise<SessionHandle>;
+  /** Restricted coordination surface; model and directory are host-owned. */
+  assistant?(): Promise<AssistantSnapshot>;
+  sendAssistant?(text: string): Promise<AssistantSnapshot>;
   /** This client shows the session now; the host streams its content here again. */
   view?(sessionId: string): Promise<void>;
   history(sessionId: string, page?: { limit?: number; before?: number }): Promise<HistoryPage>;

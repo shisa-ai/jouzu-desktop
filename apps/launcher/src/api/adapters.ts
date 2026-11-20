@@ -53,6 +53,8 @@ function hostGroups(client: HostClient) {
   const sessions: SessionApi = {
     list: () => client.sessions(),
     attach: (workspacePath, sessionPath) => client.attach(workspacePath, sessionPath),
+    assistant: () => client.assistant(),
+    sendAssistant: text => client.sendAssistant(text),
     view: sessionId => client.view(sessionId),
     history: (sessionId, page) => client.history(sessionId, page),
     messages: (sessionPath, limit) => client.messages(sessionPath, limit),

@@ -13,6 +13,7 @@ use std::{
 };
 
 mod artifacts;
+mod assistant;
 pub mod control;
 mod environment;
 pub mod events;
@@ -237,6 +238,10 @@ pub fn new_token() -> String {
 
 pub fn router(state: AppState) -> Router {
     let api = Router::new()
+        .route("/assistant", get(assistant::get))
+        .route("/assistant/messages", axum::routing::post(assistant::send))
+        .route("/assistant/projects", axum::routing::post(assistant::create))
+        .route("/assistant/projects/{id}", axum::routing::put(assistant::update))
         .route("/health", get(health))
         .route("/status", get(host_status))
         .route("/timing", axum::routing::post(record_ui_timing))
@@ -2388,6 +2393,23 @@ mod tests {
             events: events::EventHub::new(),
             models: Arc::new(models::Models::new(&dist)),
             web: Arc::new(web_access::WebAccess::disabled()),
+        }
+    }
+
+    #[tokio::test]
+    async fn assistant_routes_require_auth_and_reject_commands_and_overrides() {
+        let dir = dist();
+        let app = router(state(dir.path().to_path_buf()));
+        let (status, _, _) = call(app.clone(), get("/v1/assistant", "127.0.0.1:40123")).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        for body in [json!({"text":"/bash echo unsafe"}), json!({"text":"hello", "model":"override"})] {
+            let request = Request::builder().method("POST").uri("/v1/assistant/messages")
+                .header(header::HOST, "127.0.0.1:40123")
+                .header(header::AUTHORIZATION, format!("Bearer {}", "a".repeat(64)))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string())).unwrap();
+            let (status, _, _) = call(app.clone(), request).await;
+            assert!(status.is_client_error(), "{status}");
         }
     }
 

@@ -5,6 +5,7 @@
 
 import {
   ApiError,
+  type AssistantSnapshot,
   type ApiCapabilities,
   type ApiEvent,
   type Artifact,
@@ -311,6 +312,17 @@ export class HostClient {
     await this.request(`/v1/sessions/${encodeURIComponent(sessionId)}/view`, {
       method: "POST",
       body: JSON.stringify({ clientId: this.clientId }),
+    });
+  }
+
+  assistant(): Promise<AssistantSnapshot> {
+    return this.request<AssistantSnapshot>("/v1/assistant");
+  }
+
+  sendAssistant(text: string): Promise<AssistantSnapshot> {
+    return this.request<AssistantSnapshot>("/v1/assistant/messages", {
+      method: "POST",
+      body: JSON.stringify({ text }),
     });
   }
 
