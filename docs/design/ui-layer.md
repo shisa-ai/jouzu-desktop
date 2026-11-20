@@ -96,17 +96,36 @@ card. The tables below are the complete list of what each card shows.
 
 ### 6.1 Tools → Image generation
 
-The state comes from the image settings (saved) and the providers the runtime
-reports, each usable or with a reason code (`no-credential`, `no-credit`,
-`unreachable`, …).
+Image generation is one feature that depends on things in a chain: a connected
+provider that can make images → a model of that provider → its sizes. Each level
+exists only when the level above it has a value, so the card never shows a
+level whose parent is empty ("No image provider available", then "No models",
+then a size). Facts are not laid out side by side; the card shows the first
+level that is missing and the one action that supplies it.
 
-| State | The card shows | It does not show |
+**Where availability comes from.** The providers that can make images are the
+providers connected under Model providers, judged by the same credential the
+chat uses. There is no second sign-in state for images: a provider that is
+connected for chat is never "not signed in" for images (#96). A provider whose
+account cannot make images (no image models, or a subscription without image
+generation; whether Codex can is open in #170) is connected but not image-capable; that
+is said once, by name, not as a sign-in problem.
+
+**On means it works.** The feature is on only when the saved switch is on *and*
+at least one provider can make images. When it is not on, the agent is not
+offered `generate_image`: a tool that can only fail is not given to the agent,
+and the person never meets "Image generation is disabled" or a credential error
+in a conversation. The saved switch is never changed by the app; connecting a
+provider later turns the feature on again without a visit to this page.
+
+| State | The card shows | Not shown |
 |---|---|---|
 | Loading | Title and one waiting line | Any control |
-| Image tool not installed | Title and one line: "The image tool is not installed yet." | Provider, model, size, count, the switch |
-| No usable provider | Title, one line why, and the one action that fixes it. One shared reason: one line (for example "Image generation needs a signed-in image provider.") and **Model providers**. Different reasons: one line per provider, each with its own action | Provider, model, size, count selects; the switch as on. The saved settings are not changed |
-| At least one usable provider | The switch, then provider, model, size (only when the provider takes one) and images per call. Providers that cannot be used are not in the list; one short line under it names them and why (one line per provider) | "No models", "No image provider available" or any other empty-select text |
-| Switch off | The switch; the selects stay visible but disabled, so turning it on does not move anything | — |
+| Image tool not installed | Title, the switch disabled and off, one line: "The image tool is not installed yet." | Everything below the switch |
+| No connected provider can make images | Title, the switch disabled and off, one line naming what is missing and **Model providers**. For example "Connect Shisa.AI or OpenRouter to generate images." or, when other providers are connected, "My provider cannot generate images. Connect Shisa.AI or OpenRouter." Per-provider reasons are under Details, not on the page | Provider, model, size, images per call; any per-provider list |
+| Can make images, switch off | Title and the switch, off | Everything below the switch |
+| Can make images, switch on | The switch, then: provider (a select only when more than one provider can make images, otherwise its name as text), the model of that provider, size (only when the provider takes one), images per call | Providers that cannot make images; empty-select texts ("No models") |
+| Saving or a provider's model list fails | The failed level shows a short reason under it; the levels above keep working | — |
 
 ### 6.2 System → Jouzu Desktop
 
