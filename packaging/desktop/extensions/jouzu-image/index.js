@@ -100,7 +100,12 @@ let credentialReader = async providerId => {
   // The runtime sets PI_CODING_AGENT_DIR; the CLI mode sets it from JOUZU_HOME.
   process.env.PI_CODING_AGENT_DIR ||= join(home(), "agent");
   const { readStoredCredential } = await runtimeModule("@earendil-works/pi-coding-agent/dist/index.js");
-  return readStoredCredential(providerId);
+  const stored = readStoredCredential(providerId);
+  if (stored) return stored;
+  // The chat provider also takes Shisa.AI's key from the environment; the image
+  // tool follows the same rule so one credential works for both.
+  const key = providerId === "shisa" ? process.env.SHISA_API_KEY?.trim() : "";
+  return key ? { type: "api_key", key } : undefined;
 };
 
 export function setCredentialReader(reader) {
