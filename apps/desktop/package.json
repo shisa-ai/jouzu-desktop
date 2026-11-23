@@ -1,6 +1,6 @@
 {
   "name": "@shisa-ai/jouzu-desktop",
-  "version": "1.1.5-rc.1",
+  "version": "1.1.5-rc.2",
   "scripts": {
     "dev": "vite",
     "dev:isolated": "node scripts/dev-isolated.mjs",

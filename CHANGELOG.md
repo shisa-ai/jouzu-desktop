@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.1.5-rc.2 - 2026-11-23
+
+Second release candidate for 1.1.5, on the QA channel. It replaces 1.1.5-rc.1, which did not
+pass its evaluation (#236).
+
+- The start-up screen waits again until a runtime is ready, as in 1.1.4, so the first New
+  session after opening the app is ready at once and its first reply does not wait for a
+  runtime to start. Stop pressed right after Send there no longer leaves the session
+  starting (#236).
+
 ## 1.1.5-rc.1 - 2026-11-23
 
 First release candidate for 1.1.5, on the QA channel. It follows 1.1.4.
