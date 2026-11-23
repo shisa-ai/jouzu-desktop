@@ -123,8 +123,8 @@ function OutboxRow({ item, onRetry, onDiscard }: { item: OutboxItem; onRetry?: (
   const t = useChatText();
   const failed = item.state === "failed";
   const reason = item.code ? codeText(t, item.code) : undefined;
-  return <article aria-label="user message" data-outbox={item.state} className={`ml-6 rounded-xl border px-4 py-2 text-left ${failed ? "border-destructive/40 bg-destructive/5" : "border-border bg-muted/50 opacity-70"}`}>
-    <div className="mb-2 text-xs font-medium text-muted-foreground">{t.you}</div>
+  return <article data-slot="user-message" aria-label="user message" data-outbox={item.state} className={`ml-6 rounded-xl border px-4 py-2 text-left ${failed ? "border-destructive/40 bg-destructive/5" : "border-border bg-muted/50 opacity-70"}`}>
+    <div data-slot="user-label" className="mb-2 text-xs font-medium text-muted-foreground">{t.you}</div>
     {item.text && <ChatMarkdown text={item.text} />}
     {item.images.map((image, index) => <MessageImage key={index} kind="block" source={`data:${image.mimeType};base64,${image.data}`} alt={t.conversationAttachment} />)}
     {failed
@@ -221,8 +221,8 @@ function ChatConversationView({ projection, reasoningLive = false, workspace, bu
     }
     const user = group.find(item => item.message.role === "user");
     if (user) {
-      rows.push(<article key={key(user.index)} ref={node => { if (node) articleRefs.current.set(user.index, node); else articleRefs.current.delete(user.index); }} aria-label="user message" className="ml-6 rounded-xl border border-border bg-muted/50 px-4 py-2 text-left [content-visibility:auto] [contain-intrinsic-size:auto_160px]">
-        <div className="mb-2 text-xs font-medium text-muted-foreground">{t.you}</div>
+      rows.push(<article data-slot="user-message" key={key(user.index)} ref={node => { if (node) articleRefs.current.set(user.index, node); else articleRefs.current.delete(user.index); }} aria-label="user message" className="ml-6 rounded-xl border border-border bg-muted/50 px-4 py-2 text-left [content-visibility:auto] [contain-intrinsic-size:auto_160px]">
+        <div data-slot="user-label" className="mb-2 text-xs font-medium text-muted-foreground">{t.you}</div>
         <UserContent message={user.message} />
       </article>);
     }
@@ -236,7 +236,7 @@ function ChatConversationView({ projection, reasoningLive = false, workspace, bu
       activity.push(...split.activity);
       last = item;
     }
-    if (parts.length || activity.length) rows.push(<article key={`turn-${key(group[0].index)}`} aria-label="assistant message" ref={node => { if (node) articleRefs.current.set(group[0].index, node); else articleRefs.current.delete(group[0].index); }} className="space-y-2">{parts}{activity.length > 0 && <ActivityStrip items={activity} />}</article>);
+    if (parts.length || activity.length) rows.push(<article data-slot="assistant-message" key={`turn-${key(group[0].index)}`} aria-label="assistant message" ref={node => { if (node) articleRefs.current.set(group[0].index, node); else articleRefs.current.delete(group[0].index); }} className="space-y-2">{parts}{activity.length > 0 && <ActivityStrip items={activity} />}</article>);
     if (last) {
       const nextMessage = projection.messages[last.index + 1];
       const turnEnd = !nextMessage || nextMessage.role === "user";
@@ -263,16 +263,16 @@ function ChatConversationView({ projection, reasoningLive = false, workspace, bu
     }
   }
   return <WorkspaceContext.Provider value={workspace}>
-    <section aria-label={t.conversation} className="relative flex min-h-0 min-w-0 flex-1 flex-col">
+    <section data-slot="conversation" aria-label={t.conversation} className="relative flex min-h-0 min-w-0 flex-1 flex-col">
     <div ref={scroll} className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-5 sm:px-8" onScroll={event => { const view = event.currentTarget; following.current = view.scrollHeight - view.scrollTop - view.clientHeight < 80; setShowLatest(!following.current); if (turnMarkers.length) { const max = view.scrollHeight - view.clientHeight; const ratio = max > 0 ? Math.min(1, Math.max(0, view.scrollTop / max)) : 0; setActiveTurn(Math.min(turnMarkers.length - 1, Math.round(ratio * (turnMarkers.length - 1)))); } }}>
       {!visible.length && <div className="mx-auto max-w-xl py-16 text-center"><h2 className="text-xl font-semibold">{t.workOnTitle}</h2><p className="mt-3 text-sm text-muted-foreground">{t.workOnHint}</p></div>}
       {visible.length > shown.length
         ? <div className="mx-auto mb-4 flex max-w-3xl justify-center"><Button variant="outline" className="h-7 px-3 text-xs" onClick={() => setLimit(value => value + 50)}>Show {visible.length - shown.length} earlier message{visible.length - shown.length === 1 ? "" : "s"}</Button></div>
         : history?.more && <div className="mx-auto mb-4 flex max-w-3xl justify-center"><Button variant="outline" className="h-7 px-3 text-xs" disabled={history.loading} onClick={() => { setLimit(value => Math.max(value, visible.length) + 50); history.load(); }}>{history.loading ? t.loadingEarlier : t.loadEarlier}</Button></div>}
-      <div ref={content} className="mx-auto max-w-3xl space-y-3">{rows}
+      <div data-slot="conversation-column" ref={content} className="mx-auto max-w-3xl space-y-3">{rows}
         {outbox.map(item => <OutboxRow key={item.clientMessageId} item={item} onRetry={onRetrySend} onDiscard={onDiscardSend} />)}
-        {pendingUser && <article aria-label="user message" className="ml-6 rounded-xl border border-border bg-muted/50 px-4 py-2 text-left opacity-70">
-          <div className="mb-2 text-xs font-medium text-muted-foreground">{t.you}</div>
+        {pendingUser && <article data-slot="user-message" aria-label="user message" className="ml-6 rounded-xl border border-border bg-muted/50 px-4 py-2 text-left opacity-70">
+          <div data-slot="user-label" className="mb-2 text-xs font-medium text-muted-foreground">{t.you}</div>
           <ChatMarkdown text={pendingUser} />
         </article>}
       </div>

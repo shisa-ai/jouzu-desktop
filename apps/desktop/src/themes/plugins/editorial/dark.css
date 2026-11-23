@@ -1,0 +1,51 @@
+/* Nocturne: warm near-black, cream, an amber rule. */
+:root[data-theme="editorial"][data-mode="dark"] {
+  --color-card: #1b1712;
+  --color-card-foreground: #ede4d6;
+  --color-popover: #231e18;
+  --color-popover-foreground: #ede4d6;
+  --color-accent: #2a231b;
+  --color-accent-foreground: #f3ebdd;
+  --color-input: #5b4e3f;
+  --color-destructive: #e89a8f;
+  --color-background: #14110d;
+  --color-foreground: #ede4d6;
+  --color-primary: #d9a85c;
+  --color-primary-foreground: #17120c;
+  --color-muted: #1f1a14;
+  --color-muted-foreground: #a99e8e;
+  --color-border: #342c23;
+  --color-ring: #e3b676;
+
+  --color-action: #ede4d6;
+  --color-action-foreground: #1a1510;
+  --color-brand-soft: #2b2218;
+  --color-warning: #e3b676;
+  --color-success: #8fc7a3;
+  --color-info: #d9a85c;
+
+  --color-syntax-comment: #8c8172;
+  --color-syntax-keyword: #e0b36b;
+  --color-syntax-string: #a8c9a0;
+  --color-syntax-number: #e0a45f;
+  --color-syntax-function: #9fc7d8;
+  --color-syntax-attribute: #d6b4e0;
+  --color-syntax-builtin: #8fd0c0;
+  --color-syntax-meta: #93887a;
+
+  --radius-sm: 0;
+  --radius-md: 0;
+  --radius-lg: 0;
+  --radius-xl: 0;
+  --radius-2xl: 0;
+  --radius-3xl: 0;
+
+  --shadow-sm: none;
+  --shadow-md: none;
+  --shadow-lg: none;
+  --shadow-xl: none;
+
+  --scrollbar-thumb: #3a3127;
+  --scrollbar-thumb-hover: #4b4032;
+  color-scheme: dark;
+}

@@ -47,9 +47,12 @@ import { ChatTextProvider, chatTexts, explain } from "./chat-text";
 import { type Workspace } from "./history";
 import { parseDiagnostics, type Diagnostics } from "./diagnostics";
 import { copyText } from "./secure-context";
+import { applyTheme, readAppearance, themeChoices, themeLabel, themeModes } from "./themes/registry";
+import type { ThemeChoice } from "./themes/types";
 interface ShellState { platform: "windows" | "macos" | "linux"; recent: Workspace[]; ready: boolean; bash: boolean; bundled_git: boolean }
 interface Components { jouzu: string | null; development: boolean; desktopUpdaterConfigured?: boolean; jouzuUpdaterConfigured?: boolean; build?: string; commit?: string }
 interface RuntimeReport { status?: string; version: string | null; expectedVersion?: string; versionCurrent?: boolean; minimumVersion?: string; verifiedVersions?: string[]; mandatory?: boolean; root: string | null; app: string | null; node: boolean; nodeVersion: string | null; nodeCurrent: boolean; git: boolean; terminal: boolean }
+
 /** The prepare screen runs when the runtime must be updated, its Node is not the
  * pinned one, or Jouzu's own Git Bash is gone (#158: Setup run over an install
  * from 1.1.4 or earlier deletes it). The install extracts Git again from the
@@ -57,29 +60,26 @@ interface RuntimeReport { status?: string; version: string | null; expectedVersi
 function needsPrepare(report: RuntimeReport | null | undefined): boolean {
   return report?.mandatory === true || report?.nodeCurrent === false || report?.git === false;
 }
-type Theme = "dark" | "light" | "system";
+
 
 export function App() {
   const api = useApi();
   const native = api.capabilities.native;
   const [locale, setLocale] = useState<Locale>(() => resolveLocale(localStorage.getItem("jouzu.ui.language") ?? navigator.language));
-  const [theme, setTheme] = useState<Theme>(() => {
-    const saved = localStorage.getItem("jouzu.ui.theme");
-    return saved === "light" || saved === "system" ? saved : "dark";
-  });
+  const [appearance, setAppearance] = useState(readAppearance);
+  const { theme, mode } = appearance;
+  const setTheme = (value: string) => setAppearance(current => ({ ...current, theme: value }));
+  const setMode = (value: ThemeChoice) => setAppearance(current => ({ ...current, mode: value }));
   useEffect(() => {
     localStorage.setItem("jouzu.ui.theme", theme);
+    localStorage.setItem("jouzu.ui.mode", mode);
     const media = window.matchMedia("(prefers-color-scheme: light)");
-    const apply = () => {
-      const light = theme === "light" || (theme === "system" && media.matches);
-      document.documentElement.classList.toggle("light", light);
-      document.documentElement.style.colorScheme = light ? "light" : "dark";
-    };
+    const apply = () => applyTheme(theme, mode);
     apply();
-    if (theme !== "system") return;
+    if (mode !== "system") return;
     media.addEventListener("change", apply);
     return () => media.removeEventListener("change", apply);
-  }, [theme]);
+  }, [theme, mode]);
   const t = messages[locale];
   const review = catalogReview[locale];
   const [activePath, setActivePath] = useState<string | null>(null);
@@ -554,8 +554,8 @@ export function App() {
   // One banner for every first-run screen. `fill` lets the banner take the height
   // that a prepare or loading page would otherwise leave empty. The look is the
   // approved prepare page: cyan wash, one glow, mark and wordmark.
-  const onboardingBanner = (title: string, action?: ReactNode, intensity = 0.55, fill = false, pageHeading = false) => <div className={`relative flex ${fill ? "min-h-0 flex-1" : "min-h-56 shrink-0"} items-center justify-center overflow-hidden border-b border-border bg-gradient-to-b from-primary/25 via-primary/5 to-background px-6`}>
-    <div className="pointer-events-none absolute -top-32 size-[28rem] rounded-full bg-primary/20 blur-3xl transition-opacity duration-700 animate-[jouzu-glow_9s_ease-in-out_infinite]" style={{ opacity: intensity }} aria-hidden="true" />
+  const onboardingBanner = (title: string, action?: ReactNode, intensity = 0.55, fill = false, pageHeading = false) => <div data-slot="onboarding-cover" className={`relative flex ${fill ? "min-h-0 flex-1" : "min-h-56 shrink-0"} items-center justify-center overflow-hidden border-b border-border bg-gradient-to-b from-primary/25 via-primary/5 to-background px-6`}>
+    <div data-slot="onboarding-glow" className="pointer-events-none absolute -top-32 size-[28rem] rounded-full bg-primary/20 blur-3xl transition-opacity duration-700 animate-[jouzu-glow_9s_ease-in-out_infinite]" style={{ opacity: intensity }} aria-hidden="true" />
     <div className="relative flex flex-col items-center gap-3 text-center">
       <img src={jouzuIcon} alt="" draggable={false} className="size-20 drop-shadow-lg" />
       <p className="text-2xl font-semibold tracking-tight">Jouzu Desktop</p>
@@ -677,7 +677,16 @@ export function App() {
                 </CardContent></Card></TabsContent>
                 <TabsContent value="appearance" className="m-0 space-y-4">
                   <Card className="border-border shadow-none"><CardHeader><CardTitle>{t.appearance}</CardTitle><CardDescription>{t.appearanceHint}</CardDescription></CardHeader><CardContent>
-                    <Select value={theme} onValueChange={value => setTheme(value as Theme)}><SelectTrigger aria-label={t.appearance} className="w-full"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="system">{t.themeSystem}</SelectItem><SelectItem value="dark">{t.themeDark}</SelectItem><SelectItem value="light">{t.themeLight}</SelectItem></SelectContent></Select>
+                    <div className="space-y-4">
+                      <div className="space-y-2">
+                        <Label htmlFor="theme-family">{t.themeFamily}</Label>
+                        <Select value={theme} onValueChange={setTheme}><SelectTrigger id="theme-family" aria-label={t.themeFamily} className="w-full"><SelectValue /></SelectTrigger><SelectContent>{themeChoices().map(family => <SelectItem key={family.id} value={family.id}>{themeLabel(family, locale)}</SelectItem>)}</SelectContent></Select>
+                      </div>
+                      {themeModes(theme).length > 1 && <div className="space-y-2">
+                        <Label htmlFor="theme-mode">{t.themeMode}</Label>
+                        <Select value={mode} onValueChange={value => setMode(value as ThemeChoice)}><SelectTrigger id="theme-mode" aria-label={t.themeMode} className="w-full"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="system">{t.themeSystem}</SelectItem><SelectItem value="dark">{t.themeDark}</SelectItem><SelectItem value="light">{t.themeLight}</SelectItem></SelectContent></Select>
+                      </div>}
+                    </div>
                   </CardContent></Card>
                 </TabsContent>
                 <TabsContent value="general" className="m-0 space-y-4">

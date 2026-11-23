@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "id": "moss",
+  "style": "folio",
+  "order": 30,
+  "labels": {
+    "en": "Moss",
+    "ja": "モス",
+    "zh-Hans": "苔色",
+    "zh-Hant": "苔色"
+  },
+  "variants": {
+    "dark": {
+      "css": "/* Moss: a runtime-installed example. Copy this file, change the tokens, install it. */\n:root[data-theme=\"moss\"][data-mode=\"dark\"] {\n  --color-card: #16211a;\n  --color-card-foreground: #e4ebe2;\n  --color-popover: #1b2720;\n  --color-popover-foreground: #e4ebe2;\n  --color-accent: #223029;\n  --color-accent-foreground: #eef4ec;\n  --color-input: #526b57;\n  --color-destructive: #ef9a92;\n  --color-background: #101712;\n  --color-foreground: #e4ebe2;\n  --color-primary: #8fd0a8;\n  --color-primary-foreground: #101712;\n  --color-muted: #18231c;\n  --color-muted-foreground: #a1b0a4;\n  --color-border: #2a3a2f;\n  --color-ring: #a9dfbd;\n\n  --color-action: #e6ecdf;\n  --color-action-foreground: #121a14;\n  --color-brand-soft: #1b2d22;\n  --color-warning: #e0bd74;\n  --color-success: #7dd0a6;\n  --color-info: #8fd0a8;\n\n  --color-syntax-comment: #7f907f;\n  --color-syntax-keyword: #9fc7ff;\n  --color-syntax-string: #96d9a8;\n  --color-syntax-number: #e6c77b;\n  --color-syntax-function: #8fd0d8;\n  --color-syntax-attribute: #d6bcfa;\n  --color-syntax-builtin: #79d9c4;\n  --color-syntax-meta: #9aa6a0;\n\n  --radius-sm: 0;\n  --radius-md: 0;\n  --radius-lg: 0;\n  --radius-xl: 0;\n  --radius-2xl: 0;\n  --radius-3xl: 0;\n\n  --shadow-sm: none;\n  --shadow-md: none;\n  --shadow-lg: none;\n  --shadow-xl: none;\n\n  --scrollbar-thumb: #35463a;\n  --scrollbar-thumb-hover: #465a4c;\n  color-scheme: dark;\n}"
+    }
+  }
+}

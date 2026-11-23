@@ -99,3 +99,6 @@
 .light * { scrollbar-color: #b9aac7 transparent; }
 .light *::-webkit-scrollbar-thumb { background: #b9aac7; background-clip: padding-box; }
 .light *::-webkit-scrollbar-thumb:hover { background: #9e8bb0; background-clip: padding-box; }
+
+/* Added themes are plugins under src/themes/plugins: their CSS is imported by the
+   registry, and the original Dark and Light rules above are never touched. */

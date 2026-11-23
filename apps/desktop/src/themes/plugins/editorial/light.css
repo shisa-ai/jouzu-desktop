@@ -1,0 +1,51 @@
+/* Folio: warm paper, ink, a vermillion rule. */
+:root[data-theme="editorial"][data-mode="light"] {
+  --color-card: #faf5eb;
+  --color-card-foreground: #231d17;
+  --color-popover: #fffbf3;
+  --color-popover-foreground: #231d17;
+  --color-accent: #e5dac8;
+  --color-accent-foreground: #231d17;
+  --color-input: #9a8d7a;
+  --color-destructive: #a62b1f;
+  --color-background: #f3ede2;
+  --color-foreground: #231d17;
+  --color-primary: #a63d2a;
+  --color-primary-foreground: #fff9ef;
+  --color-muted: #ece4d6;
+  --color-muted-foreground: #6b6255;
+  --color-border: #d6cbbb;
+  --color-ring: #a63d2a;
+
+  --color-action: #241e18;
+  --color-action-foreground: #f8f1e4;
+  --color-brand-soft: #efe0d2;
+  --color-warning: #8a5a00;
+  --color-success: #2f6b4f;
+  --color-info: #34557a;
+
+  --color-syntax-comment: #8b8172;
+  --color-syntax-keyword: #9a3b28;
+  --color-syntax-string: #2f6b4f;
+  --color-syntax-number: #9a5b00;
+  --color-syntax-function: #34557a;
+  --color-syntax-attribute: #6a4c7a;
+  --color-syntax-builtin: #2e6b6b;
+  --color-syntax-meta: #7a7265;
+
+  --radius-sm: 0;
+  --radius-md: 0;
+  --radius-lg: 0;
+  --radius-xl: 0;
+  --radius-2xl: 0;
+  --radius-3xl: 0;
+
+  --shadow-sm: none;
+  --shadow-md: none;
+  --shadow-lg: none;
+  --shadow-xl: none;
+
+  --scrollbar-thumb: #c9bdaa;
+  --scrollbar-thumb-hover: #b3a691;
+  color-scheme: light;
+}

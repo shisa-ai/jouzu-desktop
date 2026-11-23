@@ -7,6 +7,14 @@ import { configureSessionPool } from "./session-store";
 import { configureAppView } from "./app-view";
 import { configureEventRouter } from "./event-router";
 import "./styles.css";
+import { loadInstalledThemes } from "./themes/installed";
+import { applyTheme, readAppearance, themePlugins } from "./themes/registry";
+
+// Installed packages are injected first, then the appearance is applied from the
+// same registry the app uses. An unknown saved id falls back to Dark.
+loadInstalledThemes(themePlugins.map(plugin => plugin.id));
+const appearance = readAppearance();
+applyTheme(appearance.theme, appearance.mode);
 
 /**
  * The shell injects the host endpoint before this script runs. Every data call goes

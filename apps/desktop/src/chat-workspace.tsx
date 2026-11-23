@@ -1609,7 +1609,7 @@ export function ChatWorkspace({ path, revision = 0, newSession = true, locked = 
   // so a sideways wheel or scrollIntoView cannot shift it (#113).
   return <div ref={chatRoot} className="relative flex min-h-0 min-w-0 flex-1 overflow-clip">
     {dropActive && <div className="pointer-events-none absolute inset-0 z-40 flex items-center justify-center border-2 border-dashed border-primary bg-background/85 text-sm font-medium text-primary">{t.dropFiles}</div>}
-    {sidebar && <aside aria-label={t.workspaces} className="absolute inset-y-0 left-0 z-20 flex w-80 max-w-[85%] flex-col border-r border-border bg-background shadow-xl md:relative md:z-auto md:shadow-none">
+    {sidebar && <aside data-slot="sidebar" aria-label={t.workspaces} className="absolute inset-y-0 left-0 z-20 flex w-80 max-w-[85%] flex-col border-r border-border bg-background shadow-xl md:relative md:z-auto md:shadow-none">
       <div className="flex items-center gap-2 px-2 pb-2 pt-3"><Button className="min-w-0 flex-1 justify-start gap-2" disabled={locked} onClick={() => void startNewSession()}><Plus className="size-4" />{t.newSession}</Button><Button variant="ghost" className="size-8 p-0 md:hidden" aria-label={t.hideWorkspaces} onClick={() => setSidebar(false)}><X className="size-4" /></Button></div>
       <div className="px-2 pb-2"><Button variant={appView === "artifacts" ? "default" : "ghost"} className="w-full justify-start gap-2" aria-pressed={appView === "artifacts"} onClick={() => setAppView(appView === "artifacts" ? "chat" : "artifacts")}><Images className="size-4" />{t.artifacts}</Button></div>
       <div className="flex items-center justify-between border-t border-border px-3 py-2">
@@ -1669,7 +1669,7 @@ export function ChatWorkspace({ path, revision = 0, newSession = true, locked = 
       </div>
     </aside>}
     <section className={appView === "artifacts" ? "hidden" : "flex min-h-0 min-w-0 flex-1 flex-col"}>
-      {hero ? <div className="flex items-center px-2 py-1.5"><Button variant="ghost" className="size-8 shrink-0 p-0" aria-label={sidebar ? t.hideWorkspaces : t.showWorkspaces} title={t.workspaces} aria-expanded={sidebar} onClick={() => setSidebar(value => !value)}><PanelLeft className="size-4" /></Button></div> : <div className="flex items-center gap-2 border-b border-border px-2 py-2 sm:px-3">
+      {hero ? <div className="flex items-center px-2 py-1.5"><Button variant="ghost" className="size-8 shrink-0 p-0" aria-label={sidebar ? t.hideWorkspaces : t.showWorkspaces} title={t.workspaces} aria-expanded={sidebar} onClick={() => setSidebar(value => !value)}><PanelLeft className="size-4" /></Button></div> : <div data-slot="session-header" className="flex items-center gap-2 border-b border-border px-2 py-2 sm:px-3">
         <Button variant="ghost" className="size-8 shrink-0 p-0" aria-label={sidebar ? t.hideWorkspaces : t.showWorkspaces} title={t.workspaces} aria-expanded={sidebar} onClick={() => setSidebar(value => !value)}><PanelLeft className="size-4" /></Button>
         <div className="flex min-w-0 flex-1 items-center gap-2">
           <h2 className="max-w-60 min-w-0 shrink-0 truncate text-sm font-semibold" title={`${name} · ${path}${snapshot.model ? ` · ${snapshot.model}` : ""}`}>{selectedTitle ?? name}</h2>
@@ -1687,7 +1687,7 @@ export function ChatWorkspace({ path, revision = 0, newSession = true, locked = 
           <Button variant="ghost" className="size-7 shrink-0 p-0" aria-label={t.toggleArtifacts} title={t.artifactsPanel} aria-pressed={panes.length > 0} onClick={toggleSide}><PanelRight className="size-3.5" /></Button>
         </div>
       </div>}
-      {booting && !hero && !localSubmitted ? <div role="status" className="flex min-h-0 flex-1 items-center justify-center text-sm text-muted-foreground">{t.startingSession}</div> : hero ? <div className="flex min-h-0 flex-1 justify-center overflow-y-auto px-4 py-8 sm:px-8">
+      {booting && !hero && !localSubmitted ? <div role="status" className="flex min-h-0 flex-1 items-center justify-center text-sm text-muted-foreground">{t.startingSession}</div> : hero ? <div data-slot="hero" className="flex min-h-0 flex-1 justify-center overflow-y-auto px-4 py-8 sm:px-8">
         <div className="my-auto w-full max-w-3xl">
           <div className="mb-7 flex flex-col items-center gap-3 text-center">
             <span className="flex size-12 items-center justify-center rounded-2xl border border-border bg-card"><Sparkles className="size-6 text-primary" aria-hidden="true" /></span>
@@ -1706,7 +1706,7 @@ export function ChatWorkspace({ path, revision = 0, newSession = true, locked = 
           <ChatConversation key={conversationKey} projection={conversationProjection} reasoningLive={!!liveThinking} workspace={path} busy={snapshot.pending} pendingUser={localSubmitted} outbox={showingAttached ? snapshot.outbox : undefined} onRetrySend={id => void connection.current?.retry(id)?.catch(() => {})} onDiscardSend={id => connection.current?.discard(id)} forkResult={forkResult} onFork={(prompt, turn) => void forkTurn(prompt, turn)} history={earlierHistory} onOpenArtifacts={openArtifactsPanel} replyAction={showingAttached ? replyAction : undefined} changedFiles={showingAttached && turnChanged && normalizedPath(turnChanged.session) === normalizedPath(snapshot.sessionFile ?? "") ? turnChanged.files : []} />
         </div>
         <div className="relative">
-          <div className="mx-auto w-full max-w-3xl">
+          <div data-slot="composer-frame" className="mx-auto w-full max-w-3xl">
             {banners}
             <AgentAction thinking={liveThinking} label={turnLabel(snapshot.activeTurn, now, t)} running={conversationProjection.running} elapsed={elapsed} settled={settled} noReply={noReply} hold={hold} notice={runtimeNotice} />
           </div>

@@ -1,0 +1,342 @@
+/* Folio: an editorial workspace. Serif prose, a ruled transcript, square surfaces.
+   The two folio themes (Nocturne, Folio) supply tokens; this file supplies the structure. */
+
+:root[data-theme-style="folio"] {
+  --folio-reading: Georgia, "Iowan Old Style", "Palatino Linotype", "Book Antiqua", "Noto Serif", "Yu Mincho", "Songti SC", serif;
+  --folio-ui: ui-sans-serif, system-ui, -apple-system, "Segoe UI Variable Text", "Segoe UI", "Helvetica Neue", Arial, "Noto Sans", sans-serif;
+}
+
+:root[data-theme-style="folio"] body {
+  font-family: var(--folio-reading);
+}
+
+:root[data-theme-style="folio"] :is(button, input, textarea, select,
+  [data-slot="button"], [data-slot="input"], [data-slot="select-trigger"], [data-slot="tabs-trigger"]) {
+  font-family: var(--folio-ui);
+}
+
+:root[data-theme-style="folio"] label {
+  font-family: var(--folio-ui);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--color-muted-foreground);
+}
+
+:root[data-theme-style="folio"] ::selection {
+  background: color-mix(in oklab, var(--color-primary) 22%, transparent);
+  color: var(--color-foreground);
+}
+
+/* Scrollbars follow the plugin's own palette. */
+:root[data-theme-style="folio"] { scrollbar-color: var(--scrollbar-thumb) transparent; }
+:root[data-theme-style="folio"] * { scrollbar-color: var(--scrollbar-thumb) transparent; }
+:root[data-theme-style="folio"] *::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); background-clip: padding-box; }
+:root[data-theme-style="folio"] *::-webkit-scrollbar-thumb:hover { background: var(--scrollbar-thumb-hover); background-clip: padding-box; }
+
+/* The masthead and session line are printed rules, not bars. */
+:root[data-theme-style="folio"] header[data-tauri-drag-region] {
+  background: var(--color-background);
+  border-bottom: 1px solid var(--color-border);
+}
+:root[data-theme-style="folio"] header[data-tauri-drag-region] h1 {
+  font-family: var(--folio-reading);
+  font-style: italic;
+  font-weight: 600;
+  font-size: 16px;
+  letter-spacing: -0.01em;
+}
+:root[data-theme-style="folio"] [data-slot="session-header"] {
+  background: var(--color-background);
+  border-bottom: 1px solid var(--color-border);
+}
+:root[data-theme-style="folio"] [data-slot="session-header"] h2 {
+  font-family: var(--folio-reading);
+  font-style: italic;
+  font-weight: 500;
+  font-size: 15px;
+}
+
+/* The sidebar is a contents page: no filled selection, just an index rule. */
+:root[data-theme-style="folio"] [data-slot="sidebar"] {
+  width: 18rem;
+  background: var(--color-card);
+  border-right: 1px solid var(--color-border);
+  box-shadow: none;
+}
+:root[data-theme-style="folio"] [data-slot="sidebar"] h2 {
+  font-family: var(--folio-ui);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.2em;
+}
+:root[data-theme-style="folio"] [data-slot="sidebar"] [data-session-selected] {
+  background: transparent;
+  border-left: 2px solid var(--color-primary);
+}
+:root[data-theme-style="folio"] [data-slot="sidebar"] [data-session-selected]::before {
+  display: none;
+}
+
+/* Controls are ruled, square, and use the UI face. The primary action is an ink block. */
+:root[data-theme-style="folio"] [data-slot="button"] {
+  border-radius: 0;
+  font-family: var(--folio-ui);
+}
+:root[data-theme-style="folio"] [data-slot="button"][data-variant="default"] {
+  background-color: var(--color-action);
+  background-image: none;
+  color: var(--color-action-foreground);
+  box-shadow: none;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+:root[data-theme-style="folio"] [data-slot="button"][data-variant="outline"] {
+  background: transparent;
+  border: 1px solid var(--color-border);
+}
+:root[data-theme-style="folio"] [data-slot="button"][data-variant="ghost"] {
+  border-radius: 0;
+}
+:root[data-theme-style="folio"] :is([data-slot="input"], [data-slot="select-trigger"]) {
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid var(--color-border);
+  border-radius: 0;
+  box-shadow: none;
+  font-family: var(--folio-ui);
+}
+:root[data-theme-style="folio"] :is([data-slot="input"], [data-slot="select-trigger"]):focus-visible {
+  border-bottom-color: var(--color-primary);
+  box-shadow: none;
+}
+:root[data-theme-style="folio"] [data-slot="switch"],
+:root[data-theme-style="folio"] [data-slot="switch-thumb"] {
+  border-radius: 0;
+}
+:root[data-theme-style="folio"] [data-slot="progress"],
+:root[data-theme-style="folio"] [data-slot="progress-indicator"] {
+  border-radius: 0;
+}
+
+/* Cards, dialogs and tabs are sheets, not floating cards. */
+:root[data-theme-style="folio"] [data-slot="card"],
+:root[data-theme-style="folio"] [data-slot="page-body"] {
+  background: var(--color-card);
+  border: 1px solid var(--color-border);
+  border-radius: 0;
+  box-shadow: none;
+}
+:root[data-theme-style="folio"] [data-slot="dialog-content"] {
+  background: var(--color-card);
+  border: 1px solid var(--color-border);
+  border-top: 2px solid var(--color-primary);
+  border-radius: 0;
+  box-shadow: none;
+}
+:root[data-theme-style="folio"] [data-slot="dialog-content"] aside {
+  background: transparent;
+  border-right: 1px solid var(--color-border);
+}
+:root[data-theme-style="folio"] [data-slot="dialog-content"] [data-slot="dialog-title"] {
+  font-family: var(--folio-reading);
+  font-size: 16px;
+  font-style: italic;
+  font-weight: 600;
+}
+[data-slot="dialog-content"] [data-slot="card-title"] {
+  font-family: var(--folio-reading);
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+:root[data-theme-style="folio"] [data-slot="dialog-content"] [data-slot="tabs-list"] {
+  counter-reset: folio-tab;
+}
+:root[data-theme-style="folio"] [data-slot="dialog-content"] [data-slot="tabs-trigger"] {
+  background: transparent;
+  border-left: 2px solid transparent;
+  border-radius: 0;
+  color: var(--color-muted-foreground);
+  font-family: var(--folio-ui);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+:root[data-theme-style="folio"] [data-slot="dialog-content"] [data-slot="tabs-trigger"]::before {
+  counter-increment: folio-tab;
+  content: counter(folio-tab, decimal-leading-zero);
+  margin-right: 0.5rem;
+  font-size: 9px;
+  color: var(--color-muted-foreground);
+}
+:root[data-theme-style="folio"] [data-slot="dialog-content"] [data-slot="tabs-trigger"]:hover {
+  background: transparent;
+  color: var(--color-foreground);
+}
+:root[data-theme-style="folio"] [data-slot="dialog-content"] [data-slot="tabs-trigger"][data-state="active"] {
+  background: transparent;
+  border-left-color: var(--color-primary);
+  box-shadow: none;
+  color: var(--color-foreground);
+}
+
+/* The composer is a ruled writing line, not a card. */
+:root[data-theme-style="folio"] :is([data-slot="message-composer"], [data-session-blocked]) {
+  max-width: 50rem;
+  padding: 1rem 0 0.25rem;
+  background: transparent;
+  border: 0;
+  border-top: 1px solid var(--color-border);
+  border-radius: 0;
+  box-shadow: none;
+  font-family: var(--folio-ui);
+}
+:root[data-theme-style="folio"] [data-slot="message-composer"]:focus-within {
+  border-top-color: var(--color-primary);
+  box-shadow: none;
+}
+:root[data-theme-style="folio"] [data-slot="message-composer"] textarea {
+  min-height: 4.5rem;
+  font-family: var(--folio-reading);
+  font-size: 15px;
+  line-height: 1.65;
+}
+:root[data-theme-style="folio"] [data-slot="message-composer"] textarea::placeholder {
+  font-family: var(--folio-ui);
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+/* The transcript: assistant is the book, the person's turn is a margin note. */
+:root[data-theme-style="folio"] [data-slot="conversation"] {
+  background: var(--color-background);
+}
+:root[data-theme-style="folio"] [data-slot="conversation-column"] {
+  max-width: 50rem;
+}
+:root[data-theme-style="folio"] [data-slot="assistant-message"] {
+  font-family: var(--folio-reading);
+}
+:root[data-theme-style="folio"] [data-slot="assistant-message"] [data-slot="markdown"] {
+  font-size: 15.5px;
+  line-height: 1.85;
+}
+:root[data-theme-style="folio"] [data-slot="user-message"] {
+  width: auto;
+  max-width: none;
+  margin: 2.25rem 0 0;
+  padding: 0 0 0 1.1rem;
+  background: transparent;
+  border: 0;
+  border-left: 2px solid var(--color-primary);
+  border-radius: 0;
+  font-family: var(--folio-ui);
+}
+:root[data-theme-style="folio"] [data-slot="user-message"]:not([data-outbox="failed"]) {
+  background: transparent;
+  border-color: var(--color-primary);
+}
+:root[data-theme-style="folio"] [data-slot="user-message"][data-outbox="failed"] {
+  background: transparent;
+  border-left-color: var(--color-destructive);
+}
+:root[data-theme-style="folio"] [data-slot="user-label"] {
+  display: block;
+  margin-bottom: 0.35rem;
+  color: var(--color-primary);
+  font-family: var(--folio-ui);
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+}
+:root[data-theme-style="folio"] [data-slot="user-message"] [data-slot="markdown"] {
+  font-family: var(--folio-ui);
+  font-size: 13.5px;
+  line-height: 1.65;
+}
+:root[data-theme-style="folio"] [data-slot="assistant-message"] section {
+  background: transparent;
+  border: 0;
+  border-left: 1px solid var(--color-border);
+  border-radius: 0;
+}
+:root[data-theme-style="folio"] [data-slot="assistant-message"] button {
+  font-family: var(--folio-ui);
+}
+:root[data-theme-style="folio"] [data-slot="markdown"] :not(pre) > code {
+  padding: 0.1em 0.3em;
+  background: var(--color-muted);
+  font-family: ui-monospace, "Cascadia Mono", "SFMono-Regular", Consolas, monospace;
+  font-size: 0.86em;
+}
+:root[data-theme-style="folio"] [data-slot="code-block"] {
+  background: var(--color-muted);
+  border: 1px solid var(--color-border);
+  border-radius: 0;
+}
+:root[data-theme-style="folio"] [data-slot="code-block"] > div:first-child {
+  background: transparent;
+  border-bottom: 1px solid var(--color-border);
+}
+:root[data-theme-style="folio"] [data-slot="code-block"] pre {
+  background: transparent;
+  font-family: ui-monospace, "Cascadia Mono", "SFMono-Regular", Consolas, monospace;
+  font-size: 12.5px;
+  line-height: 1.65;
+}
+
+/* The empty session is a title page. */
+:root[data-theme-style="folio"] [data-slot="hero"] > div,
+:root[data-theme-style="folio"] [data-slot="composer-frame"] {
+  max-width: 50rem;
+}
+:root[data-theme-style="folio"] [data-slot="hero"] h1 {
+  font-family: var(--folio-reading);
+  font-size: 2rem;
+  font-weight: 500;
+  letter-spacing: -0.02em;
+}
+:root[data-theme-style="folio"] [data-slot="hero"] p {
+  font-family: var(--folio-ui);
+  font-size: 12px;
+  letter-spacing: 0.02em;
+}
+
+/* The first run is a cover page. */
+:root[data-theme-style="folio"] [data-slot="onboarding-cover"] {
+  background-image: none;
+  background-color: var(--color-background);
+  border-bottom: 1px solid var(--color-border);
+}
+:root[data-theme-style="folio"] [data-slot="onboarding-glow"] {
+  display: none;
+}
+:root[data-theme-style="folio"] [data-slot="onboarding-cover"] img {
+  filter: none;
+}
+:root[data-theme-style="folio"] [data-slot="onboarding-cover"] p {
+  font-family: var(--folio-reading);
+  font-size: 26px;
+  font-weight: 500;
+}
+:root[data-theme-style="folio"] [data-slot="onboarding-cover"] h1 {
+  color: var(--color-muted-foreground);
+  font-family: var(--folio-ui);
+  font-size: 9px;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+}
+:root[data-theme-style="folio"] .onboarding-card {
+  background: var(--color-card);
+  border: 1px solid var(--color-border);
+  border-radius: 0;
+  box-shadow: none;
+  backdrop-filter: none;
+}

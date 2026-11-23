@@ -8,5 +8,5 @@ const variants = cva(
 );
 export function Button({ className, variant, asChild = false, ...props }: React.ComponentProps<"button"> & VariantProps<typeof variants> & { asChild?: boolean }) {
   const Component = asChild ? Slot : "button";
-  return <Component className={cn(variants({ variant }), className)} {...props} />;
+  return <Component data-slot="button" data-variant={variant ?? "default"} className={cn(variants({ variant }), className)} {...props} />;
 }
