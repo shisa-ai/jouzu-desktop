@@ -1483,18 +1483,26 @@ export function ChatWorkspace({ path, revision = 0, newSession = true, locked = 
   const flow = useMemo(() => showingAttached ? deriveFlow(snapshot.projection.tools) : deriveFlow({}), [showingAttached, snapshot.projection.tools]);
   const subagents = useMemo(() => showingAttached ? deriveSubagents(snapshot.projection.tools) : [], [showingAttached, snapshot.projection.tools]);
   const flowError = useMemo(() => showingAttached ? latestFlowError(snapshot.projection.messages) : undefined, [showingAttached, snapshot.projection.messages]);
+  // One workspace in the picker's list, the same entry in both places.
+  const pickerEntry = (workspace: WorkspaceItem) => <button key={workspace.id} type="button" role="menuitemradio" aria-checked={workspace.path === path} onClick={() => void switchWorkspace(workspace.path)} className="flex w-full items-center justify-between gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-accent">
+    <span className="min-w-0"><span className="block truncate">{workspaceLabel(workspace.path, t)}</span><span className="block truncate text-xs text-muted-foreground">{workspace.path}</span></span>
+    {workspace.path === path && <span className="text-xs text-primary">{t.current}</span>}
+  </button>;
+  // The default workspace is pinned below the picker's scrolling list, as in the
+  // sidebar (#19), and one spelling of a folder is one entry.
+  const pickerWorkspaces = [...new Map(workspaces.map(workspace => [normalizedPath(workspace.path), workspace])).values()];
+  const pickerDefault = pickerWorkspaces.find(workspace => isDefaultWorkspace(workspace.path));
+  const pickerRegular = pickerWorkspaces.filter(workspace => workspace !== pickerDefault);
   const workspacePicker = <div ref={picker} className="relative">
     <Button type="button" variant="outline" className="h-8 max-w-64 gap-2 px-2 text-xs" aria-label={t.chooseWorkspace} aria-expanded={pickerOpen} onClick={() => { if (!pickerOpen) { const bounds = picker.current?.getBoundingClientRect(); if (bounds) setPickerSpace(pickerSpaceOf(bounds)); } setPickerOpen(value => !value); }}>
       <FolderOpen className="size-4 shrink-0" aria-hidden="true" /><span className="truncate">{name}</span><ChevronDown className="size-3 shrink-0" aria-hidden="true" />
     </Button>
     {pickerOpen && <div role="menu" aria-label={t.chooseWorkspace} style={{ maxHeight: pickerSpace ?? undefined }} className="absolute left-0 top-full z-30 mt-1 flex w-80 max-w-[calc(100vw-2rem)] flex-col rounded-xl border border-border bg-popover p-2 shadow-xl">
       <div data-workspace-list className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
-      {[...workspaces].sort((left, right) => Number(isDefaultWorkspace(left.path)) - Number(isDefaultWorkspace(right.path))).map(workspace => <button key={workspace.id} type="button" role="menuitemradio" aria-checked={workspace.path === path} onClick={() => void switchWorkspace(workspace.path)} className="flex w-full items-center justify-between gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-accent">
-        <span className="min-w-0"><span className="block truncate">{workspaceLabel(workspace.path, t)}</span><span className="block truncate text-xs text-muted-foreground">{workspace.path}</span></span>
-        {workspace.path === path && <span className="text-xs text-primary">{t.current}</span>}
-      </button>)}
+      {pickerRegular.map(workspace => pickerEntry(workspace))}
       {!workspaces.length && <p className="px-2 py-2 text-sm text-muted-foreground">{t.noWorkspaces}</p>}
       </div>
+      {pickerDefault && <div data-default-workspace className="mt-1 shrink-0 border-t border-border pt-1">{pickerEntry(pickerDefault)}</div>}
       <div className="mt-1 shrink-0 border-t border-border pt-1"><Button type="button" variant="ghost" className="w-full justify-start" onClick={() => { setPickerOpen(false); onAddFolder(); }}><Plus className="size-4" />{t.addFolder}</Button></div>
     </div>}
   </div>;
@@ -1605,6 +1613,43 @@ export function ChatWorkspace({ path, revision = 0, newSession = true, locked = 
   }
   // Above the composer: only the queue of messages sent during a run.
   const banners = <SteerQueue items={queued} onEdit={id => void editQueued(id)} onRemove={id => changeQueue(client => client.unqueue(id))} onContinue={() => changeQueue(client => client.queue("continue"))} onDiscard={() => changeQueue(client => client.queue("discard"))} result={results.queue} />;
+  // One workspace group. The default workspace is pinned below the scrolling
+  // list instead of being its last group (#19): it stays in view whatever the
+  // sort, the search or the number of workspaces, and its own sessions scroll
+  // inside it.
+  const groupSection = (group: { id: string; path: string; name: string; sessions: SessionSummary[] }, pinned = false) => {
+    const open = !!search.trim() || !collapsedGroups.has(group.id);
+    return <section key={group.id} className="mb-1">
+      <div className={`group flex items-center gap-1 rounded-lg ${(selectedWorkspace ? normalizedPath(selectedWorkspace) === normalizedPath(group.path) : !selectedKey && normalizedPath(group.path) === normalizedPath(path)) ? "bg-accent/70" : "hover:bg-muted/60"}`}>
+        <button type="button" aria-label={`${open ? t.collapse : t.expand} ${group.name}`} onClick={() => setCollapsedGroups(current => { const next = toggleCollapsed(current, group.id); saveCollapsed(next); return next; })} className="flex min-w-0 flex-1 items-center gap-1.5 px-2 py-1.5 text-left">
+          {open ? <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" /> : <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" />}
+          <FolderOpen className="size-4 shrink-0 text-muted-foreground" /><span className="truncate text-sm">{group.name}</span>
+        </button>
+        <Button variant="ghost" className="mr-1 size-6 p-0 opacity-0 group-hover:opacity-100 focus:opacity-100" aria-label={fill(t.removeNamed, { name: group.path })} onClick={() => { const workspace = workspaces.find(item => normalizedPath(item.path) === normalizedPath(group.path)); if (workspace) onRemove(workspace.id); }}><X className="size-3" /></Button>
+      </div>
+      {open && <div className={`ml-4 border-l border-border pl-1.5${pinned ? " max-h-48 overflow-y-auto overscroll-contain" : ""}`}>
+        {warm.state === "failed" && normalizedPath(group.path) === normalizedPath(path) && <div className="py-1"><NoticeRow alert={{ id: "warm", level: "error", text: t.warmFailed, details: warm.error ?? undefined, actions: [{ label: t.retry, run: retryWarm }] }} /></div>}
+        {group.sessions.map(session => <div key={session.path} ref={node => { if (selectedKey === normalizedPath(session.path)) selectedRowRef.current = node; }} data-session-selected={selectedKey === normalizedPath(session.path) || undefined} className={`group/session relative flex items-center rounded-md text-sm ${selectedKey === normalizedPath(session.path) ? "bg-accent text-foreground before:absolute before:inset-y-1 before:left-0 before:w-0.5 before:rounded-full before:bg-primary" : "hover:bg-muted/60"} ${session.archived ? "opacity-60" : ""}`}>
+          {renaming && normalizedPath(renaming.path) === normalizedPath(session.path)
+            ? <Input autoFocus aria-label={t.sessionName} className="m-0.5 h-7 min-w-0 flex-1 text-sm" value={renaming.title} onChange={event => setRenaming({ path: session.path, title: event.target.value })} onFocus={event => event.target.select()} onKeyDown={event => { if (event.key === "Enter") void finishRename(true); if (event.key === "Escape") void finishRename(false); }} onBlur={() => void finishRename(true)} />
+            : <button type="button" onClick={() => void openSession(session.path)} title={session.path} className="flex min-w-0 flex-1 items-center gap-2 px-2 py-1.5 text-left">
+            {rowStates.get(session.path) ? <SessionRowStatus state={rowStates.get(session.path)!} now={listNow} t={t} /> : session.pinned ? <Pin className="size-3.5 shrink-0 text-primary" aria-label={t.pinned} /> : <MessageSquare className="size-3.5 shrink-0 text-muted-foreground" />}<span className="min-w-0 flex-1 truncate">{session.title}</span>{rowStates.get(session.path) && <span className="sr-only">{rowStateText(rowStates.get(session.path)!, listNow, t)}</span>}<span className="shrink-0 text-[11px] text-muted-foreground">{relativeTime(session.updated)}</span>{artifactCount(session.path) > 0 && <span className="shrink-0 rounded border border-border px-1 text-[10px] tabular-nums text-muted-foreground" title={fill(t.artifactCount, { n: artifactCount(session.path) })}>{artifactCount(session.path)}</span>}
+          </button>}
+          {session.saved && <div className={`relative flex shrink-0 items-center gap-0.5 pr-1 transition-opacity focus-within:opacity-100 group-hover/session:opacity-100 ${sessionMenu === session.path ? "opacity-100" : "opacity-0"}`} data-session-menu>
+            <button type="button" className="flex size-6 items-center justify-center rounded hover:bg-background/60" aria-label={session.pinned ? t.unpinSession : t.pinSession} title={session.pinned ? t.unpinSession : t.pinSession} onClick={() => void updateSession(session.path, { pinned: !session.pinned })}><Pin className={`size-3.5 ${session.pinned ? "text-primary" : "text-muted-foreground"}`} /></button>
+            <button type="button" className="flex size-6 items-center justify-center rounded hover:bg-background/60" aria-label={t.sessionActions} title={t.sessionActions} aria-haspopup="menu" aria-expanded={sessionMenu === session.path} onClick={() => setSessionMenu(value => value === session.path ? null : session.path)}><MoreHorizontal className="size-4 text-muted-foreground" /></button>
+            {sessionMenu === session.path && <div role="menu" aria-label={fill(t.actionsFor, { name: session.title })} className="absolute right-0 top-full z-40 mt-1 w-52 rounded-xl border border-border bg-popover p-1 text-sm shadow-xl">
+              <button type="button" role="menuitem" className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left hover:bg-accent" onClick={() => { void updateSession(session.path, { pinned: !session.pinned }); setSessionMenu(null); }}><Pin className="size-4 text-muted-foreground" />{session.pinned ? t.unpinSession : t.pinSession}</button>
+              <button type="button" role="menuitem" className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left hover:bg-accent" onClick={() => void renameSession(session)}><Pencil className="size-4 text-muted-foreground" />{t.rename}</button>
+              <button type="button" role="menuitem" className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left hover:bg-accent" onClick={() => { void updateSession(session.path, { archived: !session.archived }); setSessionMenu(null); }}>{session.archived ? <ArchiveRestore className="size-4 text-muted-foreground" /> : <Archive className="size-4 text-muted-foreground" />}{session.archived ? t.restoreSession : t.archiveSession}</button>
+              <button type="button" role="menuitem" className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left hover:bg-accent" onClick={() => void copySessionId(session)}>{copied === session.path ? <><Check className="size-4 text-primary" />{t.copied}</> : <><Copy className="size-4 text-muted-foreground" />{t.copySessionId}</>}</button>
+            </div>}
+          </div>}
+        </div>)}
+        {!group.sessions.length && <p className="px-2 py-1.5 text-xs text-muted-foreground">{t.noSessions}</p>}
+      </div>}
+    </section>;
+  };
   // `overflow-clip`, not `overflow-hidden`: the layout is never a scroll container,
   // so a sideways wheel or scrollIntoView cannot shift it (#113).
   return <div ref={chatRoot} className="relative flex min-h-0 min-w-0 flex-1 overflow-clip">
@@ -1625,42 +1670,11 @@ export function ChatWorkspace({ path, revision = 0, newSession = true, locked = 
       {/* Over the bottom of the list, so the list never moves. */}
       {sidebarNote && <div className="absolute inset-x-2 bottom-14 z-10 rounded-lg bg-background shadow-lg"><NoticeRow alert={{ id: "sidebar", level: "error", text: sidebarNote.text, details: sidebarNote.details, actions: [], dismiss: () => setSidebarNote(null) }} /></div>}
       {searchOpen && <div className="px-2 pb-2"><Input autoFocus aria-label={t.searchSessions} placeholder={t.searchSessions} value={search} onChange={event => setSearch(event.target.value)} /></div>}
-      <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-1.5 pb-2">
-        {[...regularGroups, ...(defaultGroup ? [defaultGroup] : [])].map(group => {
-          const open = !!search.trim() || !collapsedGroups.has(group.id);
-          return <section key={group.id} className="mb-1">
-            <div className={`group flex items-center gap-1 rounded-lg ${(selectedWorkspace ? normalizedPath(selectedWorkspace) === normalizedPath(group.path) : !selectedKey && normalizedPath(group.path) === normalizedPath(path)) ? "bg-accent/70" : "hover:bg-muted/60"}`}>
-              <button type="button" aria-label={`${open ? t.collapse : t.expand} ${group.name}`} onClick={() => setCollapsedGroups(current => { const next = toggleCollapsed(current, group.id); saveCollapsed(next); return next; })} className="flex min-w-0 flex-1 items-center gap-1.5 px-2 py-1.5 text-left">
-                {open ? <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" /> : <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" />}
-                <FolderOpen className="size-4 shrink-0 text-muted-foreground" /><span className="truncate text-sm">{group.name}</span>
-              </button>
-              <Button variant="ghost" className="mr-1 size-6 p-0 opacity-0 group-hover:opacity-100 focus:opacity-100" aria-label={fill(t.removeNamed, { name: group.path })} onClick={() => { const workspace = workspaces.find(item => normalizedPath(item.path) === normalizedPath(group.path)); if (workspace) onRemove(workspace.id); }}><X className="size-3" /></Button>
-            </div>
-            {open && <div className="ml-4 border-l border-border pl-1.5">
-              {warm.state === "failed" && normalizedPath(group.path) === normalizedPath(path) && <div className="py-1"><NoticeRow alert={{ id: "warm", level: "error", text: t.warmFailed, details: warm.error ?? undefined, actions: [{ label: t.retry, run: retryWarm }] }} /></div>}
-              {group.sessions.map(session => <div key={session.path} ref={node => { if (selectedKey === normalizedPath(session.path)) selectedRowRef.current = node; }} data-session-selected={selectedKey === normalizedPath(session.path) || undefined} className={`group/session relative flex items-center rounded-md text-sm ${selectedKey === normalizedPath(session.path) ? "bg-accent text-foreground before:absolute before:inset-y-1 before:left-0 before:w-0.5 before:rounded-full before:bg-primary" : "hover:bg-muted/60"} ${session.archived ? "opacity-60" : ""}`}>
-                {renaming && normalizedPath(renaming.path) === normalizedPath(session.path)
-                  ? <Input autoFocus aria-label={t.sessionName} className="m-0.5 h-7 min-w-0 flex-1 text-sm" value={renaming.title} onChange={event => setRenaming({ path: session.path, title: event.target.value })} onFocus={event => event.target.select()} onKeyDown={event => { if (event.key === "Enter") void finishRename(true); if (event.key === "Escape") void finishRename(false); }} onBlur={() => void finishRename(true)} />
-                  : <button type="button" onClick={() => void openSession(session.path)} title={session.path} className="flex min-w-0 flex-1 items-center gap-2 px-2 py-1.5 text-left">
-                  {rowStates.get(session.path) ? <SessionRowStatus state={rowStates.get(session.path)!} now={listNow} t={t} /> : session.pinned ? <Pin className="size-3.5 shrink-0 text-primary" aria-label={t.pinned} /> : <MessageSquare className="size-3.5 shrink-0 text-muted-foreground" />}<span className="min-w-0 flex-1 truncate">{session.title}</span>{rowStates.get(session.path) && <span className="sr-only">{rowStateText(rowStates.get(session.path)!, listNow, t)}</span>}<span className="shrink-0 text-[11px] text-muted-foreground">{relativeTime(session.updated)}</span>{artifactCount(session.path) > 0 && <span className="shrink-0 rounded border border-border px-1 text-[10px] tabular-nums text-muted-foreground" title={fill(t.artifactCount, { n: artifactCount(session.path) })}>{artifactCount(session.path)}</span>}
-                </button>}
-                {session.saved && <div className={`relative flex shrink-0 items-center gap-0.5 pr-1 transition-opacity focus-within:opacity-100 group-hover/session:opacity-100 ${sessionMenu === session.path ? "opacity-100" : "opacity-0"}`} data-session-menu>
-                  <button type="button" className="flex size-6 items-center justify-center rounded hover:bg-background/60" aria-label={session.pinned ? t.unpinSession : t.pinSession} title={session.pinned ? t.unpinSession : t.pinSession} onClick={() => void updateSession(session.path, { pinned: !session.pinned })}><Pin className={`size-3.5 ${session.pinned ? "text-primary" : "text-muted-foreground"}`} /></button>
-                  <button type="button" className="flex size-6 items-center justify-center rounded hover:bg-background/60" aria-label={t.sessionActions} title={t.sessionActions} aria-haspopup="menu" aria-expanded={sessionMenu === session.path} onClick={() => setSessionMenu(value => value === session.path ? null : session.path)}><MoreHorizontal className="size-4 text-muted-foreground" /></button>
-                  {sessionMenu === session.path && <div role="menu" aria-label={fill(t.actionsFor, { name: session.title })} className="absolute right-0 top-full z-40 mt-1 w-52 rounded-xl border border-border bg-popover p-1 text-sm shadow-xl">
-                    <button type="button" role="menuitem" className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left hover:bg-accent" onClick={() => { void updateSession(session.path, { pinned: !session.pinned }); setSessionMenu(null); }}><Pin className="size-4 text-muted-foreground" />{session.pinned ? t.unpinSession : t.pinSession}</button>
-                    <button type="button" role="menuitem" className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left hover:bg-accent" onClick={() => void renameSession(session)}><Pencil className="size-4 text-muted-foreground" />{t.rename}</button>
-                    <button type="button" role="menuitem" className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left hover:bg-accent" onClick={() => { void updateSession(session.path, { archived: !session.archived }); setSessionMenu(null); }}>{session.archived ? <ArchiveRestore className="size-4 text-muted-foreground" /> : <Archive className="size-4 text-muted-foreground" />}{session.archived ? t.restoreSession : t.archiveSession}</button>
-                    <button type="button" role="menuitem" className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left hover:bg-accent" onClick={() => void copySessionId(session)}>{copied === session.path ? <><Check className="size-4 text-primary" />{t.copied}</> : <><Copy className="size-4 text-muted-foreground" />{t.copySessionId}</>}</button>
-                  </div>}
-                </div>}
-              </div>)}
-              {!group.sessions.length && <p className="px-2 py-1.5 text-xs text-muted-foreground">{t.noSessions}</p>}
-            </div>}
-          </section>;
-        })}
+      <div data-session-list className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-1.5 pb-2">
+        {regularGroups.map(group => groupSection(group))}
         {!groups.length && <p className="p-3 text-sm text-muted-foreground">{search ? t.noMatchingSessions : t.noWorkspaces}</p>}
       </div>
+      {defaultGroup && <div data-default-workspace className="shrink-0 border-t border-border px-1.5 py-1">{groupSection(defaultGroup, true)}</div>}
       <div className="mt-auto border-t border-border p-2">
         <div className="flex items-center gap-1">
           <Button variant="ghost" className="min-w-0 flex-1 justify-start gap-2" onClick={onSettings}><Settings className="size-4" />{t.settings}</Button>

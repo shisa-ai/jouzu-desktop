@@ -78,6 +78,10 @@ ever appears in the composer's place, and only one at a time.
 - **The window loses its connection to the host**: the header shows
   "Reconnecting…" and the composer is dimmed. The session keeps running in the
   host and the window catches up on reconnect. This is not a session error.
+- **The default workspace.** It is pinned below the scrolling list of the other
+  workspaces, above Settings, and the workspace picker pins it the same way: with
+  many workspaces it stays in view, and sorting or searching the list above it
+  does not move it (#19). Its own sessions scroll inside its section.
 - The sidebar row shows whether a session is running or has ended; nothing else.
   The row and the status line both read the host's run state; the UI never
   infers run state from the shape of the transcript. Only a saved transcript shown
