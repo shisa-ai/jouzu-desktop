@@ -1,6 +1,6 @@
 # 0026 — The sidebar's grouping, order and filter are the user's choice
 
-Status: Proposed (this pull request; merging accepts it)
+Status: Accepted
 Date: 2026-11-24
 
 ## Context
