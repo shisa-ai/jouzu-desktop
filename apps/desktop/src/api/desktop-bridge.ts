@@ -6,6 +6,7 @@
 
 import { confirm } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
+import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { NativeApi } from "./jouzu-api";
 
@@ -49,6 +50,10 @@ export function createDesktopBridge(): DesktopBridge {
     openExternal: async url => {
       const { openUrl } = await import("@tauri-apps/plugin-opener");
       await openUrl(url);
+    },
+    openExternalUrl: async url => {
+      // The app's own command: it checks the URL again in Rust (ADR 0005).
+      await invoke("open_external_url", { url });
     },
     terminal: unavailable,
     installTerminal: unavailable,

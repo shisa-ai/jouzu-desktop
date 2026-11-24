@@ -43,6 +43,7 @@ function unavailableNative(): NativeApi {
     onFileDrop: () => () => {},
     reveal: fail,
     openExternal: fail,
+    openExternalUrl: fail,
     terminal: fail,
     installTerminal: fail,
     updater: { check: fail, install: fail },

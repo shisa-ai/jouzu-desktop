@@ -39,6 +39,12 @@ not one piece of screen.
 - **A turn is stopped.** The status line says the turn was stopped, from the
   host's `lastRun`; the reply keeps what it already wrote. A turn that used tools
   and then ended normally settles on the idle line.
+- **A link in a reply.** It opens the way the client can: a browser client opens
+  a new tab itself, and the desktop app hands the URL to the system through its
+  validated command, so the window never navigates. Only ordinary `http`/`https`
+  links without credentials open (ADR 0005); anything else stays inert. A remote
+  image card's Open follows the same rule, and a workspace image says the desktop
+  app is needed instead of offering a read that cannot happen (#201).
 
 ## 3. The composer
 

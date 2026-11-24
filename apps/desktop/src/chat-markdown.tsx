@@ -3,11 +3,12 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
 import "highlight.js/styles/github-dark.css";
-import { invoke } from "@tauri-apps/api/core";
 import { Button } from "./components/ui/button";
 import { MessageImage } from "./message-image";
 import { copyText } from "./secure-context";
 import { useChatText } from "./chat-text";
+import { useOptionalApi } from "./api/context";
+import { externalLinkTarget, openExternalLink } from "./external-link";
 
 function nodeText(node: ReactNode): string {
   if (typeof node === "string" || typeof node === "number") return String(node);
@@ -35,21 +36,31 @@ function Code({ children, ...props }: ComponentPropsWithoutRef<"pre">) {
 }
 export const ChatMarkdown = memo(function ChatMarkdown({ text }: { text: string }) {
   const t = useChatText();
+  const api = useOptionalApi();
+  // A browser client opens links itself; the desktop shell hands them to the
+  // app's validated native command (ADR 0005, ADR 0021).
+  const native = api?.capabilities.native ?? false;
   const [error, setError] = useState<string | null>(null);
   return <div className="select-text break-words text-left text-sm leading-7 [&_p]:my-2 [&_ul]:list-disc [&_ul]:pl-6 [&_ol]:list-decimal [&_ol]:pl-6 [&_h1]:text-xl [&_h2]:text-lg [&_h3]:font-semibold [&_blockquote]:border-l-2 [&_blockquote]:pl-3 [&_table]:block [&_table]:overflow-auto [&_td]:border [&_td]:border-border [&_td]:px-3 [&_th]:border [&_th]:border-border [&_th]:px-3">
     <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]} components={{ pre: Code,
       a: ({ href, children }) => {
-        let safe: string | undefined;
-        try {
-          const url = new URL(href ?? "");
-          if (["http:", "https:"].includes(url.protocol) && !url.username && !url.password) safe = url.href;
-        } catch { /* Leave the link inert. */ }
+        const safe = externalLinkTarget(href);
         const open = (event: MouseEvent<HTMLAnchorElement>) => {
+          if (!safe) { event.preventDefault(); setError(t.linkNotExternal); return; }
+          // A browser client: the anchor's own target opens the link, so the
+          // click is left alone. The desktop shell has no browser to hand it to.
+          if (!native) return;
           event.preventDefault();
-          if (!safe) { setError(t.linkNotExternal); return; }
-          void invoke("open_external_url", { url: safe }).catch(() => setError(t.openLinkFailed));
+          void openExternalLink(api, safe).catch(() => setError(t.openLinkFailed));
         };
-        return <a href={safe} className="inline break-all text-left text-primary underline" onClick={open} onAuxClick={event => { if (event.button === 1) open(event); }}>{children}</a>;
+        return <a
+          href={safe ?? undefined}
+          // Only a browser client uses the anchor: the shell opens it natively.
+          {...(native ? {} : { target: "_blank", rel: "noopener noreferrer" })}
+          className="inline break-all text-left text-primary underline"
+          onClick={open}
+          onAuxClick={event => { if (event.button === 1) open(event); }}
+        >{children}</a>;
       },
       img: ({ src, alt }) => <MessageImage kind="markdown" source={src} alt={alt ?? ""} />,
     }}>{text}</ReactMarkdown>
