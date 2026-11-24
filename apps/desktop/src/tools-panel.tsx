@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useApi } from "./api/context";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./components/ui/card";
+import { Button } from "./components/ui/button";
 import { Label } from "./components/ui/label";
 import { Switch } from "./components/ui/switch";
 import { ErrorLine } from "./session-alerts-view";
@@ -86,7 +87,7 @@ function readProviders(value: unknown): ImageProvider[] {
  * derived from the chat model, and the provider list and models come from the
  * extension (CLI mode) so adding a provider does not touch this page.
  */
-export function ToolsPanel() {
+export function ToolsPanel({ onOpenProviders, providersLabel }: { onOpenProviders: () => void; providersLabel: string }) {
   const t = useChatText();
   const api = useApi();
   const [tools, setTools] = useState<ToolsSettings | null>(null);
@@ -163,6 +164,8 @@ export function ToolsPanel() {
   const usable = (providers ?? []).filter(provider => provider.available);
   const unusable = (providers ?? []).filter(provider => !provider.available);
   const noProvider = providers !== null && !usable.length;
+  // Only missing credentials share one setup action; other runtime states keep their own reasons.
+  const notConfigured = !!providers?.length && providers.every(provider => !provider.available && provider.code === "no-credential");
 
   return <Card className="border-border shadow-none">
     <CardHeader>
@@ -174,32 +177,38 @@ export function ToolsPanel() {
         <Label htmlFor="image-enabled">{t.enableImageGeneration}</Label>
         <Switch id="image-enabled" aria-label={t.enableImageGeneration} checked={image.enabled} disabled={busy} onCheckedChange={enabled => void save({ enabled })} />
       </div>
+      {notConfigured && <div className="flex flex-wrap items-center justify-between gap-3">
+        <p role="status" className="text-sm text-muted-foreground">{t.imageNotConfigured}</p>
+        <Button variant="outline" onClick={onOpenProviders}>{providersLabel}</Button>
+      </div>}
       <div className="grid gap-3 sm:grid-cols-2">
-        <label className="text-sm"><span className="text-muted-foreground">{t.imageProvider}</span>
-          <select aria-label={t.imageProvider} className={select} value={noProvider ? "" : image.provider} disabled={busy || !usable.length} onChange={event => {
-            const provider = usable.find(entry => entry.id === event.target.value);
-            if (provider) void refreshModels(provider.id, "", "", undefined, provider.models);
-          }}>
-            {providers === null && <option value={image.provider}>{t.loading}</option>}
-            {noProvider && <option value="">{t.noImageProvider}</option>}
-            {usable.map(provider => <option key={provider.id} value={provider.id}>{provider.label}</option>)}
-          </select>
-        </label>
-        <label className="text-sm"><span className="text-muted-foreground">{t.imageModel}</span>
-          <select aria-label={t.imageModel} className={select} value={noProvider ? "" : image.model} disabled={busy || noProvider || !models.length} onChange={event => {
-            const model = models.find(entry => entry.id === event.target.value);
-            const size = model && model.sizes.includes(image.size) ? image.size : model?.sizes[0];
-            void save({ model: event.target.value, ...(size ? { size } : {}) });
-          }}>
-            {(noProvider || !models.length) && <option value={noProvider ? "" : image.model}>{noProvider || !image.model ? t.noModels : image.model}</option>}
-            {!noProvider && models.map(model => <option key={model.id} value={model.id}>{model.id}</option>)}
-          </select>
-        </label>
-        {sizes.length > 0 && <label className="text-sm"><span className="text-muted-foreground">{t.imageSize}</span>
-          <select aria-label={t.imageSize} className={select} value={image.size} disabled={busy || noProvider} onChange={event => void save({ size: event.target.value })}>
-            {sizes.map(size => <option key={size} value={size}>{size}</option>)}
-          </select>
-        </label>}
+        {!notConfigured && <>
+          <label className="text-sm"><span className="text-muted-foreground">{t.imageProvider}</span>
+            <select aria-label={t.imageProvider} className={select} value={noProvider ? "" : image.provider} disabled={busy || !usable.length} onChange={event => {
+              const provider = usable.find(entry => entry.id === event.target.value);
+              if (provider) void refreshModels(provider.id, "", "", undefined, provider.models);
+            }}>
+              {providers === null && <option value={image.provider}>{t.loading}</option>}
+              {noProvider && <option value="">{t.noImageProvider}</option>}
+              {usable.map(provider => <option key={provider.id} value={provider.id}>{provider.label}</option>)}
+            </select>
+          </label>
+          <label className="text-sm"><span className="text-muted-foreground">{t.imageModel}</span>
+            <select aria-label={t.imageModel} className={select} value={noProvider ? "" : image.model} disabled={busy || noProvider || !models.length} onChange={event => {
+              const model = models.find(entry => entry.id === event.target.value);
+              const size = model && model.sizes.includes(image.size) ? image.size : model?.sizes[0];
+              void save({ model: event.target.value, ...(size ? { size } : {}) });
+            }}>
+              {(noProvider || !models.length) && <option value={noProvider ? "" : image.model}>{noProvider || !image.model ? t.noModels : image.model}</option>}
+              {!noProvider && models.map(model => <option key={model.id} value={model.id}>{model.id}</option>)}
+            </select>
+          </label>
+          {sizes.length > 0 && <label className="text-sm"><span className="text-muted-foreground">{t.imageSize}</span>
+            <select aria-label={t.imageSize} className={select} value={image.size} disabled={busy || noProvider} onChange={event => void save({ size: event.target.value })}>
+              {sizes.map(size => <option key={size} value={size}>{size}</option>)}
+            </select>
+          </label>}
+        </>}
         <label className="text-sm"><span className="text-muted-foreground">{t.imagesPerCall}</span>
           <select aria-label={t.imagesPerCall} className={select} value={image.maxImages} disabled={busy} onChange={event => void save({ maxImages: Number(event.target.value) })}>
             {MAX_IMAGES.map(max => <option key={max} value={max}>{max}</option>)}
@@ -207,7 +216,7 @@ export function ToolsPanel() {
         </label>
       </div>
       {notInstalled && <p role="status" data-tools-not-installed className="text-xs text-muted-foreground">{t.codeToolsUnavailable}</p>}
-      {unusable.length > 0 && <ul aria-label={t.unavailableImageProviders} className="space-y-1 text-xs text-muted-foreground">
+      {!notConfigured && unusable.length > 0 && <ul aria-label={t.unavailableImageProviders} className="space-y-1 text-xs text-muted-foreground">
         {unusable.map(provider => <li key={provider.id} title={provider.reason || undefined}>{provider.label}: {imageWhy(t, provider.code)}</li>)}
       </ul>}
       {error != null && <ErrorLine raw={error} failed={t.toolsChangeFailed} onDismiss={() => setError(null)} />}
