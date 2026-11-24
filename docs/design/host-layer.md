@@ -128,6 +128,15 @@ describes no screens; what a person sees is in the UI document.
   makes it read catalogs, credentials and model settings anew: idle sessions at
   once, busy ones when their run ends. A message sent meanwhile waits as at
   start. A new conversation nothing was said in keeps the model it showed.
+- A warm runtime that has not answered yet is still applying its profile, under
+  the lock the runtime takes for that. The host never stops such a runtime —
+  not when settings change, and not when the pool is aimed at another folder:
+  it retires it, gives it to no session once the settings it started with have
+  changed, and stops it after it has answered. A runtime stopped mid-start
+  leaves `profile.lock` behind, and every later start fails until that expires
+  (#146; releasing the lock when its owner is gone is jouzu#55). While a
+  retired runtime is still starting it holds the profile lock, so a session
+  that needs a runtime waits for it instead of starting one beside it (#94).
 
 ## 5. Configuration queue
 

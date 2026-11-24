@@ -67,6 +67,16 @@ struct Slot {
     /// The runtime's answer to `get_state` once it is ready: its own blank
     /// session (file and model), which a new conversation takes over as is.
     state: Option<Value>,
+    /// The pool no longer wants it, but does not stop it yet: it is stopped
+    /// once it has answered. A runtime is applying its profile (under the lock
+    /// it takes for that) until it answers, and stopping it before then leaves
+    /// the lock behind, which blocks every later start until it expires (#146).
+    retired: bool,
+    /// Started before a settings change. A session never takes it: the runtime
+    /// it would get would not use the settings that changed. One that is still
+    /// starting also keeps other runtimes from starting beside it, because it
+    /// holds the profile lock until it answers.
+    superseded: bool,
 }
 
 /// A warm runtime handed to a session.
@@ -107,6 +117,10 @@ struct Inner {
     /// second runtime starting beside the first exits with code 1 (#94). So
     /// until one has answered, only one runtime starts at a time.
     converged: bool,
+    /// The generation in which the settings runtimes read at start last
+    /// changed. A runtime of an earlier generation was started with the old
+    /// settings, so no session is given it.
+    settings_generation: u64,
 }
 
 /// Blank runtimes kept warm. The entry session is the fifth runtime.
@@ -142,7 +156,8 @@ fn assign(plan: &[Option<PathBuf>], slots: &[Slot]) -> (Vec<Option<usize>>, Vec<
     let mut assigned = vec![None; slots.len()];
     for ready_pass in [true, false] {
         for (index, slot) in slots.iter().enumerate() {
-            if assigned[index].is_some() || slot.ready_ms.is_some() != ready_pass {
+            // A retired runtime fills no place: it is about to be replaced.
+            if assigned[index].is_some() || slot.retired || slot.ready_ms.is_some() != ready_pass {
                 continue;
             }
             if let Some(place) = (0..plan.len())
@@ -177,8 +192,16 @@ impl Inner {
     fn next(&self) -> Option<usize> {
         self.slots
             .iter()
-            .position(|slot| slot.ready_ms.is_some())
-            .or_else(|| (!self.slots.is_empty()).then_some(0))
+            .position(|slot| slot.ready_ms.is_some() && !slot.superseded)
+            .or_else(|| self.slots.iter().position(|slot| !slot.superseded))
+    }
+
+    /// The runtime the pool is busy with, as the status reports it: the one a
+    /// session would take, else a retired one that is still starting (the pool
+    /// waits for it before it can start what it wants).
+    fn current(&self) -> Option<usize> {
+        self.next()
+            .or_else(|| self.slots.iter().position(|slot| slot.ready_ms.is_none()))
     }
 }
 
@@ -238,6 +261,7 @@ impl WarmPool {
                 spawning: None,
                 stopped: false,
                 converged: false,
+                settings_generation: 0,
             }),
             changed: Box::new(changed),
             ready: Notify::new(),
@@ -261,7 +285,7 @@ impl WarmPool {
     }
 
     fn describe(inner: &Inner) -> Value {
-        let next = inner.next().map(|index| &inner.slots[index]);
+        let next = inner.current().map(|index| &inner.slots[index]);
         json!({
             "state": inner.state().as_str(),
             "elapsedMs": next.map(|slot| slot.started_at.elapsed().as_millis() as u64),
@@ -346,16 +370,26 @@ impl WarmPool {
         let target: Arc<Mutex<Option<mpsc::Sender<RuntimeEvent>>>> = Arc::new(Mutex::new(None));
         {
             let mut inner = self.lock();
-            if inner.generation != generation {
-                // Retired while spawning (aimed elsewhere, recycled, stopped):
-                // start what the pool wants now instead.
+            if inner.stopped {
+                // The host is shutting down: nothing will wait for it.
                 drop(inner);
                 runtime.terminate();
-                self.fill_replacing(Some(generation));
                 self.notify();
                 return;
             }
-            inner.spawning = None;
+            // Retired while spawning (aimed elsewhere, recycled): it starts
+            // anyway, because a process that never got to apply the profile
+            // would be stopped before it could release the profile lock. It is
+            // kept out of the way and stopped once it has answered (#146).
+            let retired = inner.generation != generation;
+            let superseded = generation < inner.settings_generation;
+            if inner
+                .spawning
+                .as_ref()
+                .is_some_and(|(spawning, _)| *spawning == generation)
+            {
+                inner.spawning = None;
+            }
             inner.slots.push(Slot {
                 generation,
                 workspace,
@@ -364,6 +398,8 @@ impl WarmPool {
                 started_at: Instant::now(),
                 ready_ms: None,
                 state: None,
+                retired,
+                superseded,
             });
         }
         self.notify();
@@ -423,6 +459,31 @@ impl WarmPool {
                 .await;
             match result {
                 Ok(state) => {
+                    // A retired runtime answered: its start-up (the profile it
+                    // applies under the lock) is over, so it can be stopped
+                    // now, and the pool starts what it wants instead (#146).
+                    let retired = {
+                        let mut inner = pool.lock();
+                        let index = inner
+                            .slots
+                            .iter()
+                            .position(|slot| slot.generation == generation);
+                        match index {
+                            Some(index) if inner.slots[index].retired => {
+                                inner.slots.remove(index);
+                                true
+                            }
+                            Some(_) => false,
+                            None => return,
+                        }
+                    };
+                    if retired {
+                        runtime.terminate();
+                        pool.ready.notify_waiters();
+                        pool.notify();
+                        pool.fill();
+                        return;
+                    }
                     if let Some((known, configured)) = known {
                         // A blank runtime's model is what a new conversation
                         // starts on; its list is what every runtime offers.
@@ -475,6 +536,26 @@ impl WarmPool {
     }
 
     fn failed(self: &Arc<Self>, generation: u64, message: String) {
+        // A runtime already being retired is not the pool's: its failure is
+        // not news, and it does not count against the warm-up. What the pool
+        // wants next starts below (#146).
+        let retired = {
+            let mut inner = self.lock();
+            let retired = inner
+                .slots
+                .iter()
+                .any(|slot| slot.generation == generation && slot.retired);
+            if retired {
+                inner.slots.retain(|slot| slot.generation != generation);
+            }
+            retired
+        };
+        if retired {
+            self.ready.notify_waiters();
+            self.notify();
+            self.fill();
+            return;
+        }
         let retry = {
             let mut inner = self.lock();
             let before = inner.slots.len();
@@ -524,10 +605,15 @@ impl WarmPool {
     ) -> Option<Taken> {
         let slot = {
             let mut inner = self.lock();
+            // A superseded runtime was started with settings that changed
+            // since: it is never handed to a session. A merely retired one can
+            // still be taken (the pool only wanted its place filled elsewhere).
             let matches = |slot: &Slot| {
-                slot.workspace
-                    .as_deref()
-                    .is_some_and(|warm| same_folder(warm, workspace))
+                !slot.superseded
+                    && slot
+                        .workspace
+                        .as_deref()
+                        .is_some_and(|warm| same_folder(warm, workspace))
             };
             // Same folder ready, then same folder starting (a cross-folder switch
             // costs more than the rest of a start), then any ready, then the oldest.
@@ -568,7 +654,7 @@ impl WarmPool {
     /// folder that dropped out of the recent list, or a spare of the previous
     /// most recent folder); then the pool fills.
     pub fn aim(self: &Arc<Self>, workspace: &Path) {
-        let stale = {
+        let (stale, retired) = {
             let mut inner = self.lock();
             let already_first = inner
                 .recent
@@ -595,13 +681,26 @@ impl WarmPool {
             let (assigned, _) = assign(&plan, &inner.slots);
             let mut keep = Vec::new();
             let mut stale = Vec::new();
+            let mut retire = Vec::new();
+            let mut retired = false;
             for (slot, place) in std::mem::take(&mut inner.slots).into_iter().zip(assigned) {
                 if place.is_some() {
                     keep.push(slot);
-                } else {
+                } else if slot.ready_ms.is_some() || inner.stopped {
+                    // Its profile is applied: it can be stopped now.
                     stale.push(slot);
+                } else {
+                    // Still starting: it is stopped once it has answered, so
+                    // it never leaves its profile lock behind (#146).
+                    retired = true;
+                    retire.push(Slot {
+                        retired: true,
+                        superseded: slot.generation < inner.settings_generation,
+                        ..slot
+                    });
                 }
             }
+            keep.extend(retire);
             inner.slots = keep;
             // A runtime still being spawned keeps going if the new plan has an
             // empty place for its folder; otherwise it is retired once spawned.
@@ -612,13 +711,13 @@ impl WarmPool {
             if !wanted {
                 inner.generation += 1;
             }
-            stale
+            (stale, retired)
         };
-        let retired = !stale.is_empty();
+        let changed = !stale.is_empty() || retired;
         for slot in stale {
             slot.runtime.terminate();
         }
-        if retired {
+        if changed {
             self.notify();
         }
         self.fill();
@@ -631,7 +730,9 @@ impl WarmPool {
     pub fn hurry(&self) {
         let pid = {
             let inner = self.lock();
-            inner.next().map(|index| inner.slots[index].runtime.pid())
+            // A retired runtime that is still starting is what the pool waits
+            // for, so it is on the same critical path.
+            inner.current().map(|index| inner.slots[index].runtime.pid())
         };
         if let Some(pid) = pid {
             process::set_low_priority(pid, false);
@@ -661,10 +762,22 @@ impl WarmPool {
 
     /// Whether a session that found no runtime to take must wait before it
     /// starts its own: no runtime has answered yet and another one is booting
-    /// (the pool's, still being spawned, or one a session is attaching to).
+    /// (the pool's, still being spawned, or one a session is attaching to), or
+    /// one is being retired and cannot be taken but still holds the profile
+    /// lock until it answers.
     pub fn must_wait(&self) -> bool {
         let inner = self.lock();
-        !inner.converged && !inner.stopped && (inner.spawning.is_some() || inner.attaching > 0)
+        if inner.stopped {
+            return false;
+        }
+        if inner
+            .slots
+            .iter()
+            .any(|slot| slot.superseded && slot.ready_ms.is_none())
+        {
+            return true;
+        }
+        !inner.converged && (inner.spawning.is_some() || inner.attaching > 0)
     }
 
     /// Wait until `must_wait` is false, up to `timeout`.
@@ -692,12 +805,13 @@ impl WarmPool {
     }
 
     /// A started runtime nobody has taken yet, to ask about itself (the models
-    /// it registered) without attaching it to a session.
+    /// it registered) without attaching it to a session. A superseded runtime is
+    /// started with settings that changed since, so it is not asked.
     pub fn ready_runtime(&self) -> Option<Arc<RuntimeSupervisor>> {
         self.lock()
             .slots
             .iter()
-            .find(|slot| slot.ready_ms.is_some())
+            .find(|slot| slot.ready_ms.is_some() && !slot.superseded)
             .map(|slot| slot.runtime.clone())
     }
 
@@ -740,20 +854,43 @@ impl WarmPool {
     /// Settings the runtime reads at start changed: replace the unused warm
     /// runtimes so the next session does not get the old settings.
     pub fn recycle(self: &Arc<Self>) {
-        let slots = {
+        let stop_now = {
             let mut inner = self.lock();
             inner.failures = 0;
             inner.generation += 1;
+            inner.settings_generation = inner.generation;
             inner.error = None;
             // What changed (a profile, a sign-in) is applied by the next runtime
             // that starts; let it start alone again.
             inner.converged = false;
-            std::mem::take(&mut inner.slots)
+            let mut stop_now = Vec::new();
+            let mut retire = Vec::new();
+            for slot in std::mem::take(&mut inner.slots) {
+                if slot.ready_ms.is_some() || inner.stopped {
+                    // Its profile is applied: it can be stopped now.
+                    stop_now.push(slot);
+                } else {
+                    // A runtime that has not answered yet is still applying its
+                    // profile under the runtime's lock. Stopping it now leaves
+                    // that lock behind and blocks every later start until it
+                    // expires (#146), so it is kept out of the way and stopped
+                    // once it has answered.
+                    retire.push(Slot {
+                        retired: true,
+                        superseded: true,
+                        ..slot
+                    });
+                }
+            }
+            inner.slots = retire;
+            stop_now
         };
-        for slot in slots {
+        for slot in stop_now {
             slot.runtime.terminate();
         }
         self.notify();
+        // While a retired runtime is still starting, `fill` waits for it: two
+        // runtimes applying the profile at once fail on the same lock (#94).
         self.fill();
     }
 
