@@ -122,6 +122,7 @@ function bridge() {
     onFileDrop: vi.fn(() => () => {}),
     reveal: vi.fn(async () => undefined),
     openExternal: vi.fn(async () => undefined),
+    openExternalUrl: vi.fn(async () => undefined),
     terminal: vi.fn(async () => undefined),
     installTerminal: vi.fn(async () => undefined),
     updater: { check: vi.fn(async () => ({})), install: vi.fn(async () => undefined) },

@@ -397,7 +397,17 @@ export interface NativeApi {
    */
   onFileDrop(listener: (event: { type: "over" | "drop" | "leave"; paths: string[]; position?: { x: number; y: number } }) => void): () => void;
   reveal(path: string): Promise<void>;
+  /**
+   * The fixed, already-checked links of the app itself (sign-in, web access):
+   * the shell's opener plugin, limited by its capability list.
+   */
   openExternal(url: string): Promise<void>;
+  /**
+   * A link from content (a transcript, a remote image): the app's own
+   * `open_external_url` command, which applies the URL policy in Rust
+   * (ADR 0005). Not available to a browser client, which opens links itself.
+   */
+  openExternalUrl(url: string): Promise<void>;
   terminal(path?: string): Promise<void>;
   installTerminal(): Promise<void>;
   updater: {

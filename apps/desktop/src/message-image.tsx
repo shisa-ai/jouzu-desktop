@@ -1,6 +1,5 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { openUrl } from "@tauri-apps/plugin-opener";
 import { Check, Copy, ExternalLink, FolderOpen, ImageOff } from "lucide-react";
 import { Button } from "./components/ui/button";
 import { JouzuLoader } from "./components/ui/jouzu-loader";
@@ -8,6 +7,7 @@ import { useWorkspaceRoot } from "./workspace-context";
 import { copyText } from "./secure-context";
 import { useOptionalApi } from "./api/context";
 import type { JouzuApi } from "./api/jouzu-api";
+import { openExternalLink } from "./external-link";
 import type { HostAttachmentRef } from "./chat-projection";
 import { fill, chatTexts, useChatText, type ChatText } from "./chat-text";
 
@@ -51,6 +51,7 @@ export type ImageCardReason =
   | "not-a-file"
   | "unsupported-mime"
   | "workspace-unavailable"
+  | "desktop-only"
   | "no-source"
   | "invalid-source";
 
@@ -69,6 +70,7 @@ const REASON_TEXT = (t: ChatText): Record<ImageCardReason, string> => ({
   "not-a-file": t.notAFile,
   "unsupported-mime": t.previewUnsupported,
   "workspace-unavailable": t.workspaceUnavailable,
+  "desktop-only": t.imageDesktopOnly,
   "no-source": t.noImageSource,
   "invalid-source": t.invalidImageSource,
 });
@@ -324,6 +326,9 @@ function CopyPathButton({ path }: { path: string }) {
 /** Exported so the card states can be rendered directly in a static test. */
 export function ImageFallbackCard({ reason, name, path, bytes, detail }: { reason: ImageCardReason; name: string; path?: string; bytes?: number; detail?: string }) {
   const t = useChatText();
+  // Revealing a file is the desktop shell's; a browser client would offer a
+  // button that can do nothing (ADR 0021). Copying the path works everywhere.
+  const revealable = useOptionalApi()?.capabilities.native ?? false;
   const label = imageReasonText(reason, t);
   const size = reason === "too-large" ? formatBytes(bytes ?? 0) : "";
   return <figure role="group" aria-label={`${name}: ${label}`} className="my-2 overflow-hidden rounded-lg border border-border bg-muted/30 text-left">
@@ -336,7 +341,7 @@ export function ImageFallbackCard({ reason, name, path, bytes, detail }: { reaso
       </div>
     </div>
     {path && <div className="flex flex-wrap justify-end gap-1 border-t border-border/60 px-2 py-1">
-      <RevealButton path={path} />
+      {revealable && <RevealButton path={path} />}
       <CopyPathButton path={path} />
     </div>}
   </figure>;
@@ -344,6 +349,8 @@ export function ImageFallbackCard({ reason, name, path, bytes, detail }: { reaso
 
 function RemoteImageCard({ url, host, alt, openable }: { url: string; host: string; alt: string; openable: boolean }) {
   const t = useChatText();
+  const api = useOptionalApi();
+  const [error, setError] = useState<string | null>(null);
   return <figure role="group" aria-label={fill(t.remoteImageOn, { host })} className="my-2 overflow-hidden rounded-lg border border-border bg-muted/30 text-left">
     <div className="flex items-start gap-2 px-3 py-2">
       <ImageOff className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
@@ -353,8 +360,12 @@ function RemoteImageCard({ url, host, alt, openable }: { url: string; host: stri
       </div>
     </div>
     {openable && <div className="flex justify-end border-t border-border/60 px-2 py-1">
-      <Button variant="ghost" className={CARD_ACTION} onClick={() => { void invoke("open_external_url", { url }).catch(() => openUrl(url).catch(() => {})); }}><ExternalLink className="size-3" />{t.open}</Button>
+      <Button variant="ghost" className={CARD_ACTION} onClick={() => {
+        setError(null);
+        void openExternalLink(api, url).catch(() => setError(t.openLinkFailed));
+      }}><ExternalLink className="size-3" />{t.open}</Button>
     </div>}
+    {error && <p role="alert" className="border-t border-border/60 px-2 py-1 text-[11px] text-destructive">{error}</p>}
   </figure>;
 }
 
@@ -377,11 +388,15 @@ type LocalState = { status: "loading" } | { status: "ready"; payload: LocalImage
 
 function LocalImage({ workspace, path, name, alt, caption }: { workspace: string; path: string; name: string; alt: string; caption: boolean }) {
   const t = useChatText();
+  // A workspace file is read by the desktop shell; a browser client has no
+  // filesystem, so the card says that instead of failing a native read (#201).
+  const native = useOptionalApi()?.capabilities.native ?? false;
   const [state, setState] = useState<LocalState>(() => {
-    const cached = readCached(workspace, path);
+    const cached = native ? readCached(workspace, path) : undefined;
     return cached ? { status: "ready", payload: cached } : { status: "loading" };
   });
   useEffect(() => {
+    if (!native) return;
     let cancelled = false;
     const cached = readCached(workspace, path);
     if (cached) {
@@ -395,7 +410,8 @@ function LocalImage({ workspace, path, name, alt, caption }: { workspace: string
       if (!cancelled) setState({ status: "failed", error: normalizeImageError(error, t) });
     });
     return () => { cancelled = true; };
-  }, [workspace, path]);
+  }, [workspace, path, native]);
+  if (!native) return <ImageFallbackCard reason="desktop-only" name={name} path={path} />;
   if (state.status === "ready") {
     return <InlineImage src={`data:${state.payload.mimeType};base64,${state.payload.data}`} alt={alt} caption={caption} />;
   }

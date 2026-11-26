@@ -4,6 +4,9 @@ import { classifyImageSource, HostAttachmentImage, ImageFallbackCard, MessageIma
 import { ApiProvider } from "./api/context";
 import type { JouzuApi } from "./api/jouzu-api";
 
+/** A client as the image card sees it: only the desktop shell has native actions. */
+const client = (native: boolean) => ({ capabilities: { native } }) as unknown as JouzuApi;
+
 describe("image source classification", () => {
   it("resolves a relative path inside the workspace", () => {
     expect(resolveWorkspacePath("C:/work", "prusalicer-shots/09.png")).toEqual({ absolute: "C:/work/prusalicer-shots/09.png", inside: true });
@@ -56,12 +59,26 @@ describe("transcript image rendering", () => {
   });
 
   it("renders an outside-workspace card with the path, Reveal and Copy path", () => {
-    const html = renderToStaticMarkup(<MessageImage kind="markdown" source="C:/other/outside.png" alt="diagram" workspace="C:/work" />);
+    const html = renderToStaticMarkup(<ApiProvider api={client(true)}><MessageImage kind="markdown" source="C:/other/outside.png" alt="diagram" workspace="C:/work" /></ApiProvider>);
     expect(html).toContain("Outside the workspace");
     expect(html).toContain("outside.png");
     expect(html).toContain("C:/other/outside.png");
     expect(html).toContain("Reveal");
     expect(html).toContain("Copy path");
+    expect(html).not.toContain("<img");
+  });
+
+  it("offers no Reveal to a browser client, which cannot reveal a file", () => {
+    const html = renderToStaticMarkup(<ApiProvider api={client(false)}><MessageImage kind="markdown" source="C:/other/outside.png" alt="diagram" workspace="C:/work" /></ApiProvider>);
+    expect(html).toContain("Outside the workspace");
+    expect(html).not.toContain("Reveal");
+    expect(html).toContain("Copy path");
+  });
+
+  it("says a workspace image needs the desktop app, instead of failing a native read", () => {
+    const html = renderToStaticMarkup(<ApiProvider api={client(false)}><MessageImage kind="markdown" source="shots/a.png" alt="shot" workspace="C:/work" /></ApiProvider>);
+    expect(html).toContain("Only the desktop app can read workspace files.");
+    expect(html).not.toContain("Loading image");
     expect(html).not.toContain("<img");
   });
 
@@ -104,7 +121,7 @@ describe("transcript image rendering", () => {
       ["not-a-file", "Not a file"],
     ] as const;
     for (const [reason, text] of cases) {
-      const html = renderToStaticMarkup(<ImageFallbackCard reason={reason} name="shot.png" path="C:/work/shot.png" bytes={reason === "too-large" ? 12 * 1024 * 1024 : undefined} />);
+      const html = renderToStaticMarkup(<ApiProvider api={client(true)}><ImageFallbackCard reason={reason} name="shot.png" path="C:/work/shot.png" bytes={reason === "too-large" ? 12 * 1024 * 1024 : undefined} /></ApiProvider>);
       expect(html).toContain(text);
       expect(html).toContain("Reveal");
       expect(html).toContain("Copy path");
