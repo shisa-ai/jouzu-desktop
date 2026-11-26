@@ -35,6 +35,7 @@ Records 0001–0012 come from the former planning repository (migrated 2026-11-1
 | [0025](0025-desktop-on-tauri-mobile-native.md) | Desktop stays on Tauri; phones and tablets get native apps | Accepted |
 | [0026](0026-sidebar-arrangement-is-the-users-choice.md) | The sidebar's grouping, order and filter are the user's choice | Accepted; amended by 0027 |
 | [0027](0027-one-arrangement-menu.md) | The sidebar has one arrangement menu | Accepted |
+| [0028](0028-system-protection.md) | The agent's tools run at a permission level the host owns | Proposed |
 
 ## Adding a record
 
