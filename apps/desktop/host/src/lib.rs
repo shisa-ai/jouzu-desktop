@@ -6202,6 +6202,19 @@ mod session_tests {
         (manager, installation, gate)
     }
 
+    /// The installation turns `ready` before its ready hook starts the warm
+    /// pool, so a test that reads the pool waits for the hook as well.
+    async fn warm_pool_after_install(manager: &SessionManager) -> Arc<crate::runtime::WarmPool> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(pool) = manager.warm_runtime() {
+                return pool;
+            }
+            assert!(Instant::now() < deadline, "the warm pool started with the installation");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
     async fn wait_installed(installation: &installation::Installation) {
         let deadline = Instant::now() + Duration::from_secs(10);
         while !installation.is_ready() {
@@ -6235,7 +6248,7 @@ mod session_tests {
         drop(held);
         wait_installed(&installation).await;
 
-        let pool = manager.warm_runtime().expect("the warm pool started with the installation");
+        let pool = warm_pool_after_install(&manager).await;
         let status = pool.wait_settled(Duration::from_secs(10)).await;
         assert_eq!(status["state"], "ready", "{status}");
         let session = manager
@@ -6260,7 +6273,7 @@ mod session_tests {
         manager.enable_warm_runtime();
         installation.begin();
         wait_installed(&installation).await;
-        manager.warm_runtime().unwrap().wait_settled(Duration::from_secs(10)).await;
+        warm_pool_after_install(&manager).await.wait_settled(Duration::from_secs(10)).await;
 
         std::fs::remove_dir_all(managed.path().join("app")).unwrap();
         let error = manager
@@ -6269,7 +6282,7 @@ mod session_tests {
             .expect("the files are gone");
         assert_eq!(error.code, "runtime-not-ready");
         wait_installed(&installation).await;
-        let status = manager.warm_runtime().unwrap().wait_settled(Duration::from_secs(10)).await;
+        let status = warm_pool_after_install(&manager).await.wait_settled(Duration::from_secs(10)).await;
         assert_eq!(status["state"], "ready", "{status}");
         let session = manager
             .create_pending(workspace.path().to_str().unwrap(), None, None)
