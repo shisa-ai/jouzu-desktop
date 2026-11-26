@@ -5987,10 +5987,54 @@ mod session_tests {
         manager.stop_all();
     }
 
+    /// #146 through the other path: a folder switch (the aim a new session
+    /// does) while the warm runtime is still starting. It is retired, not
+    /// stopped mid-start, and the session still gets a runtime for its folder.
+    #[tokio::test]
+    async fn aiming_elsewhere_retires_a_starting_warm_runtime() {
+        let (manager, _home, workspace) =
+            manager_with_env(50, &[("FAKE_RUNTIME_START_DELAY_MS", "600")]);
+        let pool = manager.enable_warm_runtime().expect("warm pool");
+        wait_until(|| pool.status()["warm"].as_u64().unwrap_or(0) >= 1).await;
+        let scratch = pool.status();
+        assert_eq!(scratch["ready"], 0, "{scratch}");
+        let pid = scratch["pid"].as_u64().expect("a runtime pid");
+        let folder = std::fs::canonicalize(workspace.path()).unwrap();
+
+        let session = manager
+            .create_pending(folder.to_str().unwrap(), None, None)
+            .unwrap();
+        let aimed = pool.status();
+        assert!(
+            aimed["slots"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|slot| slot["pid"] == json!(pid)),
+            "the runtime starting for the old folder was stopped mid-start: {aimed}"
+        );
+
+        // The session cannot use a runtime started in another folder (its own
+        // blank session belongs there), so it gets one for its folder, after
+        // the retired start is over.
+        session.attach_early();
+        wait_model_state(&session, "ready").await;
+        assert_ne!(session.runtime_pid(), Some(pid as u32));
+        manager.stop_all();
+    }
+
     #[tokio::test]
     async fn a_session_takes_a_warm_runtime_that_is_still_starting() {
-        let (manager, _home, workspace) =
+        let (manager, home, workspace) =
             manager_with_env(50, &[("FAKE_RUNTIME_START_DELAY_MS", "500")]);
+        // Warm for the session's folder, so aiming there changes nothing and
+        // the runtime it is starting is the one the session can take.
+        let folder = std::fs::canonicalize(workspace.path()).unwrap();
+        std::fs::write(
+            home.path().join("warm-workspace.txt"),
+            folder.to_string_lossy().as_bytes(),
+        )
+        .unwrap();
         let pool = manager.enable_warm_runtime().expect("warm pool");
         let session = manager
             .create_pending(workspace.path().to_str().unwrap(), None, None)
@@ -6050,6 +6094,57 @@ mod session_tests {
         let value: Value = serde_json::from_str(&body).unwrap();
         assert_eq!(value["state"], "ready", "{value}");
         assert!(value["readyMs"].as_u64().unwrap() >= 300, "{value}");
+        manager.stop_all();
+    }
+
+    /// #146: a settings change must not stop a warm runtime in the middle of
+    /// its start-up. Until it answers, it is still applying its profile under
+    /// the runtime's lock, and a runtime stopped there leaves the lock behind,
+    /// which blocks every later start until it expires. The pool retires it
+    /// instead and stops it once it has answered.
+    #[tokio::test]
+    async fn a_settings_change_retires_a_starting_warm_runtime_until_it_answers() {
+        let (manager, home, workspace) =
+            manager_with_env(50, &[("FAKE_RUNTIME_START_DELAY_MS", "1500")]);
+        let folder = std::fs::canonicalize(workspace.path()).unwrap();
+        // The pool starts its first runtime for the folder it remembers, so
+        // nothing else retires it before the settings change does.
+        std::fs::write(
+            home.path().join("warm-workspace.txt"),
+            folder.to_string_lossy().as_bytes(),
+        )
+        .unwrap();
+        let pool = manager.enable_warm_runtime().expect("warm pool");
+        wait_until(|| pool.status()["warm"].as_u64().unwrap_or(0) >= 1).await;
+        let starting = pool.status();
+        assert_eq!(starting["ready"], 0, "{starting}");
+        let pid = starting["slots"][0]["pid"].as_u64().expect("a runtime pid");
+
+        // Settings changed while it starts.
+        pool.recycle();
+        let after = pool.status();
+        let slot = after["slots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|slot| slot["pid"] == json!(pid))
+            .unwrap_or_else(|| panic!("the starting runtime was stopped mid-start: {after}"));
+        assert_eq!(slot["ready"], false, "{after}");
+        // A session that needs a runtime now must wait for it rather than start
+        // beside it and fail on the same profile lock.
+        assert!(pool.must_wait(), "{after}");
+
+        // It answered: its start-up is over, so it is stopped now and the pool
+        // starts one for the settings that changed.
+        wait_until(|| {
+            pool.status()["slots"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|slot| slot["pid"] != json!(pid))
+        })
+        .await;
+        wait_until(|| pool.status()["ready"].as_u64().unwrap_or(0) >= 1).await;
         manager.stop_all();
     }
 
